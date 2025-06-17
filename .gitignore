@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+.env
+.venv
+env/
+venv/
+ENV/
+# Conda environments
+.conda
+conda-meta/
+
+# IDE specific files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Operating System files
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+*.spec # PyInstaller spec file
+
+# Logs (if any are written to files by default)
+*.log
