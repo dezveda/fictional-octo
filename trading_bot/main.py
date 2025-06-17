@@ -64,12 +64,18 @@ class BotApplication:
             # Ensure client is initialized in fetcher before calling fetch_historical_klines
             # The fetch_historical_klines method now handles client initialization.
 
-            strategy_tf_str = settings.STRATEGY_TIMEFRAME.replace('T', 'min') # For Timedelta
-            fetch_interval_str = settings.KLINE_FETCH_INTERVAL.replace('m', 'min') # Assuming 'm' for minutes
+            # Process timeframe strings for pd.Timedelta compatibility
+            processed_strategy_tf_str = settings.STRATEGY_TIMEFRAME.lower()
+            if 't' in processed_strategy_tf_str and not 'min' in processed_strategy_tf_str:
+                processed_strategy_tf_str = processed_strategy_tf_str.replace('t', 'min')
+            strategy_tf_delta = pd.Timedelta(processed_strategy_tf_str)
 
-            strategy_tf_delta = pd.Timedelta(strategy_tf_str)
-            fetch_interval_delta = pd.Timedelta(fetch_interval_str)
-
+            processed_fetch_interval_str = settings.KLINE_FETCH_INTERVAL.lower()
+            if 'm' in processed_fetch_interval_str and not 'min' in processed_fetch_interval_str and 'ms' not in processed_fetch_interval_str:
+                processed_fetch_interval_str = processed_fetch_interval_str.replace('m', 'min')
+            elif 's' in processed_fetch_interval_str and not 'sec' in processed_fetch_interval_str and 'ms' not in processed_fetch_interval_str:
+                processed_fetch_interval_str = processed_fetch_interval_str.replace('s', 'sec')
+            fetch_interval_delta = pd.Timedelta(processed_fetch_interval_str)
 
             if strategy_tf_delta < fetch_interval_delta:
                 logger.error(f"Strategy timeframe {settings.STRATEGY_TIMEFRAME} cannot be smaller than fetch interval {settings.KLINE_FETCH_INTERVAL}.")
