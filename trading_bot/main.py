@@ -22,7 +22,8 @@ class BotApplication:
         self.strategy = GoldenStrategy(
             on_status_update=self.schedule_gui_update(self.gui_app.update_status_bar),
             on_indicators_update=self.schedule_gui_update(self.gui_app.update_indicators_display),
-            on_signal_update=self.schedule_gui_update(self.gui_app.update_signal_display)
+            on_signal_update=self.schedule_gui_update(self.gui_app.update_signal_display),
+            on_chart_update=self.schedule_gui_update(self.gui_app.update_chart) # Add chart update callback
         )
 
 
@@ -126,6 +127,14 @@ class BotApplication:
                         )
                         for k_idx, k_data in enumerate(historical_klines):
                             self.handle_new_kline_data(k_data)
+                            # Update GUI with the price of the current historical kline being processed
+                            if k_data and 'c' in k_data: # Ensure k_data and 'c' key exist
+                                try:
+                                    price_val = float(k_data['c'])
+                                    self.schedule_gui_update(self.gui_app.update_price_display)(f"{price_val:.2f}")
+                                except ValueError:
+                                    logger.warning(f"[MainApp] Could not convert historical kline close price to float: {k_data.get('c')}")
+
                             if (k_idx + 1) % 250 == 0 or (k_idx + 1) == len(historical_klines): # Update every 250 klines or on the last one
                                  self.schedule_gui_update(self.gui_app.update_status_bar)(
                                      f"[MainApp] Processed {k_idx+1}/{len(historical_klines)} historical '{settings.KLINE_FETCH_INTERVAL}' klines for aggregation..."

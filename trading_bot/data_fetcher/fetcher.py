@@ -101,6 +101,7 @@ class DataFetcher:
 
             # Callbacks with new data
             if self.on_price_update_callback and self.latest_price is not None:
+                logger.debug(f"[DataFetcher] Live kline. Latest price: {self.latest_price}. Triggering on_price_update_callback if callback set.")
                 try:
                     self.on_price_update_callback(f"{self.latest_price:.2f}") # Pass formatted string
                 except Exception as e:

@@ -1,4 +1,6 @@
-python-binance
-pandas
-numpy
 customtkinter
+matplotlib
+mplfinance
+numpy
+pandas
+python-binance
