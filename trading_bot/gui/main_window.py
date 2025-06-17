@@ -32,10 +32,10 @@ class App(ctk.CTk):
         self.price_signal_frame.grid_columnconfigure(2, weight=2)
 
         ctk.CTkLabel(self.price_signal_frame, text="BTC/USDT:", font=ctk.CTkFont(size=18, weight="bold")).grid(row=0, column=0, padx=(10,0), pady=10, sticky="w")
-        self.price_label = ctk.CTkLabel(self.price_signal_frame, text="N/A", font=ctk.CTkFont(size=20, weight="bold"), text_color=("green", "green"))
+        self.price_label = ctk.CTkLabel(self.price_signal_frame, text="N/A", font=ctk.CTkFont(size=20, weight="bold"), text_color=("green", "lightgreen")) # Adjusted light mode color
         self.price_label.grid(row=0, column=1, padx=(0,10), pady=10, sticky="w")
 
-        self.signal_label = ctk.CTkLabel(self.price_signal_frame, text="Signal: ---", font=ctk.CTkFont(size=18, weight="bold"), text_color="yellow")
+        self.signal_label = ctk.CTkLabel(self.price_signal_frame, text="Signal: Initializing...", font=ctk.CTkFont(size=18, weight="bold"), text_color="yellow")
         self.signal_label.grid(row=0, column=2, padx=10, pady=10, sticky="e")
 
         self.main_content_frame.grid_rowconfigure(0, weight=0)
@@ -48,7 +48,7 @@ class App(ctk.CTk):
 
         self.indicators_frame = ctk.CTkScrollableFrame(self.indicators_outer_frame, corner_radius=3, height=150)
         self.indicators_frame.pack(fill="x", expand=True, padx=5, pady=5)
-        self.indicators_details_label = ctk.CTkLabel(self.indicators_frame, text="RSI: N/A\nSupertrend: N/A\nMACD Hist: N/A\nKDJ (J): N/A\nSAR: N/A",
+        self.indicators_details_label = ctk.CTkLabel(self.indicators_frame, text="Calculating initial indicators...",
                                                      font=ctk.CTkFont(size=14), justify="left", anchor="nw")
         self.indicators_details_label.pack(padx=5, pady=5, anchor="nw", fill="x")
 
@@ -114,25 +114,36 @@ class App(ctk.CTk):
     def update_indicators_display(self, indicators_data):
         try:
             if isinstance(indicators_data, dict):
+                if 'status' in indicators_data: # Check for a status message first
+                    timeframe = indicators_data.get('timeframe', settings.STRATEGY_TIMEFRAME if 'settings' in globals() else '')
+                    status_text = f"({timeframe}) {indicators_data['status']}" if timeframe else indicators_data['status']
+                    self.indicators_details_label.configure(text=status_text)
+                    return
+
                 display_text = []
                 timeframe = indicators_data.get('timeframe', '')
                 if timeframe:
                     display_text.append(f"--- Indicators ({timeframe}) ---")
 
-                if 'RSI' in indicators_data: display_text.append(f"RSI ({settings.RSI_PERIOD}): {indicators_data['RSI']:.2f}" if isinstance(indicators_data['RSI'], float) else f"RSI ({settings.RSI_PERIOD}): {indicators_data['RSI']}")
-                if 'ST_DIR' in indicators_data: display_text.append(f"Supertrend ({settings.ATR_PERIOD},{settings.SUPERTREND_MULTIPLIER}): {indicators_data['ST_DIR']}")
+                # Standard indicator formatting (from previous version)
+                if 'RSI' in indicators_data: display_text.append(f"RSI ({settings.RSI_PERIOD if 'settings' in globals() else 'N/A'}): {indicators_data['RSI']:.2f}" if isinstance(indicators_data['RSI'], float) else f"RSI ({settings.RSI_PERIOD if 'settings' in globals() else 'N/A'}): {indicators_data['RSI']}")
+                if 'ST_DIR' in indicators_data: display_text.append(f"Supertrend ({settings.ATR_PERIOD if 'settings' in globals() else 'N/A'},{settings.SUPERTREND_MULTIPLIER if 'settings' in globals() else 'N/A'}): {indicators_data['ST_DIR']}")
                 if 'ST_VAL' in indicators_data: display_text.append(f"  └ Value: {indicators_data['ST_VAL']:.2f}" if isinstance(indicators_data['ST_VAL'], float) else f"  └ Value: {indicators_data['ST_VAL']}")
-                if 'MACD_H' in indicators_data: display_text.append(f"MACD Hist ({settings.MACD_SHORT_PERIOD},{settings.MACD_LONG_PERIOD},{settings.MACD_SIGNAL_PERIOD}): {indicators_data['MACD_H']:.4f}" if isinstance(indicators_data['MACD_H'], float) else f"MACD Hist: {indicators_data['MACD_H']}")
-                if 'KDJ_J' in indicators_data: display_text.append(f"KDJ ({settings.KDJ_N_PERIOD},{settings.KDJ_M1_PERIOD},{settings.KDJ_M2_PERIOD}) (J): {indicators_data['KDJ_J']:.2f}" if isinstance(indicators_data['KDJ_J'], float) else f"KDJ (J): {indicators_data['KDJ_J']}")
-                if 'SAR_VAL' in indicators_data: display_text.append(f"SAR ({settings.SAR_INITIAL_AF},{settings.SAR_AF_INCREMENT},{settings.SAR_MAX_AF}): {indicators_data['SAR_VAL']:.2f}" if isinstance(indicators_data['SAR_VAL'], float) else f"SAR: {indicators_data['SAR_VAL']}")
+                if 'MACD_H' in indicators_data: display_text.append(f"MACD Hist ({settings.MACD_SHORT_PERIOD if 'settings' in globals() else 'N/A'},{settings.MACD_LONG_PERIOD if 'settings' in globals() else 'N/A'},{settings.MACD_SIGNAL_PERIOD if 'settings' in globals() else 'N/A'}): {indicators_data['MACD_H']:.4f}" if isinstance(indicators_data['MACD_H'], float) else f"MACD Hist: {indicators_data['MACD_H']}")
+                if 'KDJ_J' in indicators_data: display_text.append(f"KDJ ({settings.KDJ_N_PERIOD if 'settings' in globals() else 'N/A'},{settings.KDJ_M1_PERIOD if 'settings' in globals() else 'N/A'},{settings.KDJ_M2_PERIOD if 'settings' in globals() else 'N/A'}) (J): {indicators_data['KDJ_J']:.2f}" if isinstance(indicators_data['KDJ_J'], float) else f"KDJ (J): {indicators_data['KDJ_J']}")
+                if 'SAR_VAL' in indicators_data: display_text.append(f"SAR ({settings.SAR_INITIAL_AF if 'settings' in globals() else 'N/A'},{settings.SAR_AF_INCREMENT if 'settings' in globals() else 'N/A'},{settings.SAR_MAX_AF if 'settings' in globals() else 'N/A'}): {indicators_data['SAR_VAL']:.2f}" if isinstance(indicators_data['SAR_VAL'], float) else f"SAR: {indicators_data['SAR_VAL']}")
                 if 'SAR_DIR' in indicators_data: display_text.append(f"  └ Dir: {indicators_data['SAR_DIR']}")
-                if 'ATR' in indicators_data: display_text.append(f"ATR ({settings.ATR_PERIOD}): {indicators_data['ATR']:.4f}" if isinstance(indicators_data['ATR'], float) else f"ATR: {indicators_data['ATR']}")
+                if 'ATR' in indicators_data: display_text.append(f"ATR ({settings.ATR_PERIOD if 'settings' in globals() else 'N/A'}): {indicators_data['ATR']:.4f}" if isinstance(indicators_data['ATR'], float) else f"ATR: {indicators_data['ATR']}")
 
                 self.indicators_details_label.configure(text="\n".join(display_text))
-            else:
+            else: # Assume it's a pre-formatted string (e.g. for signals if this method was ever misused)
                 self.indicators_details_label.configure(text=str(indicators_data))
         except Exception as e:
-            logger_gui.error(f"Error updating indicators display: {e}", exc_info=False)
+            # Ensure logger_gui is defined or use a fallback print
+            if 'logger_gui' in globals() or 'logger_gui' in locals():
+                 logger_gui.error(f"Error in update_indicators_display: {e}", exc_info=False)
+            else:
+                 print(f"GUI Error in update_indicators_display: {e}")
 
 
 if __name__ == '__main__':
