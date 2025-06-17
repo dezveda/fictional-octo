@@ -116,13 +116,13 @@ class BotApplication:
                     if historical_klines:
                         self.strategy.is_historical_fill_active = True
                         self.schedule_gui_update(self.gui_app.update_status_bar)(
-                            f"[MainApp] Processing {len(historical_klines)} historical klines (detailed UI updates suppressed during fill)..."
+                            f"[MainApp] Processing {len(historical_klines)} historical '{settings.KLINE_FETCH_INTERVAL}' klines (detailed UI updates suppressed)..."
                         )
                         for k_idx, k_data in enumerate(historical_klines):
                             self.handle_new_kline_data(k_data)
-                            if (k_idx + 1) % 500 == 0: # Less frequent status updates during fill
+                            if (k_idx + 1) % 250 == 0 or (k_idx + 1) == len(historical_klines): # Update every 250 klines or on the last one
                                  self.schedule_gui_update(self.gui_app.update_status_bar)(
-                                     f"[MainApp] Processed {k_idx+1}/{len(historical_klines)} historical klines..."
+                                     f"[MainApp] Processed {k_idx+1}/{len(historical_klines)} historical '{settings.KLINE_FETCH_INTERVAL}' klines for aggregation..."
                                  )
 
                         self.strategy.is_historical_fill_active = False

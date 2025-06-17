@@ -170,9 +170,19 @@ class GoldenStrategy:
         ) + 5 # Use a small buffer over the absolute minimum needed by any indicator
 
         if len(self.agg_close_prices) < min_agg_bars_for_strategy:
+            status_msg_waiting = f"[GoldenStrategy] Collecting more AGGREGATED bars... ({len(self.agg_close_prices)}/{min_agg_bars_for_strategy}) for {self.strategy_timeframe_str} timeframe"
             if self.on_status_update:
-                self.on_status_update(f"[GoldenStrategy] Collecting more AGGREGATED bars... ({len(self.agg_close_prices)}/{min_agg_bars_for_strategy}) for {self.strategy_timeframe_str} timeframe")
-            return
+                self.on_status_update(status_msg_waiting)
+            # Send a 'waiting' state to GUI if not in historical fill
+            if not self.is_historical_fill_active:
+                if self.on_indicators_update:
+                    self.on_indicators_update({
+                        'timeframe': self.strategy_timeframe_str,
+                        'status': f"Waiting for {min_agg_bars_for_strategy - len(self.agg_close_prices)} more '{self.strategy_timeframe_str}' bars..."
+                    })
+                if self.on_signal_update: # Also update signal display to show waiting
+                    self.on_signal_update(f"Waiting for data on {self.strategy_timeframe_str}...")
+            return # Return early
 
         close_series = pd.Series(list(self.agg_close_prices))
         high_series = pd.Series(list(self.agg_high_prices))
