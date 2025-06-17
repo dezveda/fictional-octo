@@ -59,6 +59,8 @@ class GoldenStrategy:
 
         self.current_agg_kline_buffer = [] # Buffer for 1s klines for current aggregating bar
         self.last_agg_bar_start_time = None
+        self.is_historical_fill_active = False # Flag to control GUI updates during fill
+
 
         if self.on_status_update:
             self.on_status_update(f"[GoldenStrategy] Initialized for timeframe: {self.strategy_timeframe_str}. Agg history len: {self.agg_kline_max_len} (needs {min_bars_needed} for indicators).")
@@ -182,7 +184,7 @@ class GoldenStrategy:
         atr_series = calculator.calculate_atr(high_series, low_series, close_series, period=settings.ATR_PERIOD)
         latest_atr_val = atr_series.iloc[-1] if atr_series is not None and not atr_series.empty and not pd.isna(atr_series.iloc[-1]) else None
 
-        if self.on_indicators_update:
+        if self.on_indicators_update and not self.is_historical_fill_active:
             indicator_gui_data = {
                 'timeframe': self.strategy_timeframe_str,
                 'RSI': rsi_data if rsi_data is not None else 'N/A',
@@ -221,13 +223,14 @@ class GoldenStrategy:
         )
 
         if signal:
-            if self.on_signal_update:
+            if self.on_signal_update and not self.is_historical_fill_active:
                 tp_info = f", TP: {signal.get('tp'):.2f}" if signal.get('tp') is not None else ""
                 sl_info = f", SL: {signal.get('sl'):.2f}" if signal.get('sl') is not None else ""
                 self.on_signal_update(f"({self.strategy_timeframe_str}) {signal['type']} @ {signal['price']:.2f}{tp_info}{sl_info}")
-            logger.info(f"({self.strategy_timeframe_str}) Generated Signal: {signal}")
+            # Log signal regardless of historical fill, but GUI update is conditional
+            logger.info(f"({self.strategy_timeframe_str}) Generated Signal: {signal} (HistoricalFillActive: {self.is_historical_fill_active})")
         else:
-            if self.on_status_update:
+            if self.on_status_update and not self.is_historical_fill_active: # Only log "no signal" for live bars
                  self.on_status_update(f"[GoldenStrategy] ({self.strategy_timeframe_str}) No signal generated on this bar.")
 
     def process_new_kline(self, kline_data):

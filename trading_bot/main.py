@@ -1,6 +1,10 @@
 import asyncio
 import threading
+import asyncio
+import threading
 import logging
+import pandas as pd # For pd.Timedelta
+from datetime import datetime, timezone # For lookback_start_str calculation
 from trading_bot.gui.main_window import App
 from trading_bot.data_fetcher.fetcher import DataFetcher
 from trading_bot.strategy.gold_strategy import GoldenStrategy
@@ -21,14 +25,17 @@ class BotApplication:
             on_signal_update=self.schedule_gui_update(self.gui_app.update_signal_display)
         )
 
+
+        self.stop_event = threading.Event() # Initialize stop_event first
+
         self.fetcher = DataFetcher(
             symbol=settings.TRADING_SYMBOL,
             on_kline_callback=self.handle_new_kline_data, # Strategy processes full kline
             on_price_update_callback=self.schedule_gui_update(self.gui_app.update_price_display), # GUI gets quick price string
-            on_status_update=self.schedule_gui_update(self.gui_app.update_status_bar)
+            on_status_update=self.schedule_gui_update(self.gui_app.update_status_bar),
+            stop_event=self.stop_event # Pass the stop event to the fetcher
         )
 
-        self.stop_event = threading.Event()
         self.asyncio_thread = None
         self.fetcher_loop = None # To store the loop of the fetcher thread
 
@@ -48,18 +55,110 @@ class BotApplication:
         self.strategy.process_new_kline(kline_data)
 
     async def start_fetcher_async(self):
-        """ Coroutine to run the DataFetcher. """
+        """ Coroutine to run the DataFetcher, including historical fill. """
         try:
-            logger.info("Starting DataFetcher asyncio task...")
-            self.schedule_gui_update(self.gui_app.update_status_bar)("[MainApp] Attempting to start data fetching...")
-            await self.fetcher.start_fetching()
+            logger.info("Starting DataFetcher asyncio task (including historical fill)...")
+            self.schedule_gui_update(self.gui_app.update_status_bar)("[MainApp] Initializing data...")
+
+            # 1. Fetch historical data
+            # Ensure client is initialized in fetcher before calling fetch_historical_klines
+            # The fetch_historical_klines method now handles client initialization.
+
+            strategy_tf_str = settings.STRATEGY_TIMEFRAME.replace('T', 'min') # For Timedelta
+            fetch_interval_str = settings.KLINE_FETCH_INTERVAL.replace('m', 'min') # Assuming 'm' for minutes
+
+            strategy_tf_delta = pd.Timedelta(strategy_tf_str)
+            fetch_interval_delta = pd.Timedelta(fetch_interval_str)
+
+
+            if strategy_tf_delta < fetch_interval_delta:
+                logger.error(f"Strategy timeframe {settings.STRATEGY_TIMEFRAME} cannot be smaller than fetch interval {settings.KLINE_FETCH_INTERVAL}.")
+                self.schedule_gui_update(self.gui_app.update_status_bar)("[MainApp] Config Error: Strategy TF < Fetch Interval. Halting.")
+                return
+
+            num_agg_bars_needed = settings.HISTORICAL_LOOKBACK_AGG_BARS_COUNT
+            lookback_start_str_for_api = None
+
+            if num_agg_bars_needed > 0 :
+                # Calculate total duration needed for the strategy timeframe bars
+                total_duration_for_strategy_bars = num_agg_bars_needed * strategy_tf_delta
+
+                # Add a small buffer to ensure enough data (e.g., a few fetch intervals)
+                buffer_duration = fetch_interval_delta * 10 # Buffer of 10 base fetch intervals
+                total_lookback_duration = total_duration_for_strategy_bars + buffer_duration
+
+                # Calculate the actual start date string for the API
+                # python-binance start_str uses format like "1 day ago UTC", "10 hours ago UTC", "1 Jan, 2020"
+                # We want to fetch data *before* the current moment.
+                # For "X units ago UTC", it's relative to the time the call is made.
+                # Let's calculate based on total hours.
+                total_hours_lookback = total_lookback_duration.total_seconds() / 3600
+
+                if total_hours_lookback > 48: # If more than 2 days, express in days for simplicity
+                    lookback_start_str_for_api = f"{int(total_hours_lookback / 24) +1} days ago UTC" # Add 1 for buffer
+                else:
+                    lookback_start_str_for_api = f"{int(total_hours_lookback) +1} hours ago UTC" # Add 1 for buffer
+
+                logger.info(f"Calculated historical lookback: {lookback_start_str_for_api} to get approx {num_agg_bars_needed} of {settings.STRATEGY_TIMEFRAME} bars using {settings.KLINE_FETCH_INTERVAL} klines.")
+
+                if fetch_interval_delta > pd.Timedelta(0): # Ensure fetch_interval is valid
+                    self.schedule_gui_update(self.gui_app.update_status_bar)(
+                        f"[MainApp] Fetching historical data using lookback: {lookback_start_str_for_api} for {num_agg_bars_needed} '{settings.STRATEGY_TIMEFRAME}' bars..."
+                    )
+
+                    historical_klines = await self.fetcher.fetch_historical_klines(
+                        symbol_to_fetch=settings.TRADING_SYMBOL,
+                        interval_for_api=self.fetcher.api_interval,
+                        lookback_start_str=lookback_start_str_for_api, # Use this instead of limit
+                        limit=None # Let start_str define the range; library handles pagination
+                    )
+
+                    if historical_klines:
+                        self.strategy.is_historical_fill_active = True
+                        self.schedule_gui_update(self.gui_app.update_status_bar)(
+                            f"[MainApp] Processing {len(historical_klines)} historical klines (detailed UI updates suppressed during fill)..."
+                        )
+                        for k_idx, k_data in enumerate(historical_klines):
+                            self.handle_new_kline_data(k_data)
+                            if (k_idx + 1) % 500 == 0: # Less frequent status updates during fill
+                                 self.schedule_gui_update(self.gui_app.update_status_bar)(
+                                     f"[MainApp] Processed {k_idx+1}/{len(historical_klines)} historical klines..."
+                                 )
+
+                        self.strategy.is_historical_fill_active = False
+                        # Perform one final update to GUI with the state after historical fill
+                        if self.strategy.agg_kline_data_deque: # If any aggregated bars were formed
+                            try:
+                                logger.info('[MainApp] Triggering final GUI update after historical fill.')
+                                # This call will now update GUI as flag is false
+                                self.strategy._run_strategy_on_aggregated_data()
+                            except Exception as e_strat_call:
+                                logger.error(f'[MainApp] Error during final strategy call for GUI update: {e_strat_call}', exc_info=True)
+                                self.schedule_gui_update(self.gui_app.update_status_bar)(f'[MainApp] Error in final UI refresh: {e_strat_call}')
+                        self.schedule_gui_update(self.gui_app.update_status_bar)("[MainApp] Historical data processing complete. UI updated.")
+                    else:
+                        self.strategy.is_historical_fill_active = False # Ensure flag is reset
+                        self.schedule_gui_update(self.gui_app.update_status_bar)("[MainApp] No historical data fetched. Strategy will populate with live data.")
+                else:
+                    self.strategy.is_historical_fill_active = False # Ensure flag is reset
+                    self.schedule_gui_update(self.gui_app.update_status_bar)("[MainApp] Skipping historical data fetch (0 klines requested or invalid calculation).")
+            else:
+                 self.strategy.is_historical_fill_active = False # Ensure flag is reset
+                 self.schedule_gui_update(self.gui_app.update_status_bar)("[MainApp] Skipping historical data fetch (lookback bars or interval invalid).")
+
+
+            # 2. Start live WebSocket fetching
+            if not self.stop_event.is_set(): # Only start if not already shutting down
+                self.schedule_gui_update(self.gui_app.update_status_bar)("[MainApp] Starting live data fetching...")
+                await self.fetcher.start_fetching()
+
         except Exception as e:
-            logger.error(f"DataFetcher crashed: {e}", exc_info=True)
-            self.schedule_gui_update(self.gui_app.update_status_bar)(f"[MainApp] DataFetcher CRASHED: {e}")
+            logger.error(f"DataFetcher startup or historical fill crashed: {e}", exc_info=True)
+            self.schedule_gui_update(self.gui_app.update_status_bar)(f"[MainApp] Data Pre-fill/Fetcher CRASHED: {e}")
         finally:
-            logger.info("DataFetcher asyncio task finished.")
-            if not self.stop_event.is_set(): # If not stopped by user
-                 self.schedule_gui_update(self.gui_app.update_status_bar)("[MainApp] DataFetcher stopped unexpectedly. Check logs.")
+            logger.info("DataFetcher asyncio task (start_fetcher_async in main) finished.")
+            if not self.stop_event.is_set():
+                 self.schedule_gui_update(self.gui_app.update_status_bar)("[MainApp] Live DataFetcher stopped. Check logs.")
 
 
     def run_asyncio_loop_in_thread(self):

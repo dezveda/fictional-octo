@@ -38,8 +38,22 @@ ATR_TP_MULTIPLIER = 2.0 # Example: TP is 2 * ATR
 ATR_SL_MULTIPLIER = 1.5 # Example: SL is 1.5 * ATR
 
 # Timeframe for strategy calculations (e.g., '1T' for 1 minute, '5T', '15T', '1H', '4H')
-# Note: 'T' is pandas offset alias for minute.
+# Note: 'T' is pandas offset alias for minute. Use 'min' for pd.Timedelta, e.g. '1min', '60min'
 STRATEGY_TIMEFRAME = "1H"
+
+# Interval for DataFetcher to fetch klines (e.g., '1m', '5m', '1h') - must match Binance API options for websockets and historical data
+# For 1s data via WebSocket: fetcher.py currently hardcodes AsyncClient.KLINE_INTERVAL_1SECOND
+# This KLINE_FETCH_INTERVAL would be for the historical data fetch to match strategy aggregation, or if WS also changes.
+# The prompt implies this is for WS, but 1s is usually fetched for responsiveness if strategy is on higher TF.
+# Let's assume this is for the WebSocket kline interval if we make it configurable,
+# and historical data fetch will use this too.
+# For now, fetcher.py uses 1s for WebSocket. This setting might be for a different purpose or future refactor.
+# Let's assume it's for the base kline interval the strategy *could* receive if not 1s.
+# The prompt's fetcher code changes `start_fetching` to use this.
+KLINE_FETCH_INTERVAL = "1m" # Example: fetch 1-minute klines for WebSocket and historical.
+
+# Number of STRATEGY_TIMEFRAME bars to pre-fill with historical data
+HISTORICAL_LOOKBACK_AGG_BARS_COUNT = 150 # e.g., 150 bars of STRATEGY_TIMEFRAME
 
 # Minimum profit/loss percentages
 MIN_TP_DISTANCE_PERCENTAGE = 0.005  # 0.5% minimum distance for TP from entry
