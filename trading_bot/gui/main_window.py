@@ -226,7 +226,7 @@ class App(ctk.CTk):
                                        volume={'up':'#00b060', 'down':'#fe3032'}, ohlc='inherit')
             s = mpf.make_mpf_style(base_mpf_style='nightclouds', marketcolors=mc, gridstyle=':',
                                    facecolor='#1c1c1c',
-                                   figcolor=self.figure.get_facecolor()) # Use figure's actual facecolor
+                                   figcolor='#2B2B2B') # Use hardcoded hex string
 
             mpf.plot(chart_data_df,
                      type='candle',
