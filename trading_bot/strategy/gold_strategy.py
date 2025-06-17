@@ -15,67 +15,47 @@ import logging
 logger = logging.getLogger(__name__)
 
 class GoldenStrategy:
-    def __init__(self, on_status_update=None, on_indicators_update=None, on_signal_update=None):
+    def __init__(self, on_status_update=None, on_indicators_update=None, on_signal_update=None, on_chart_update=None):
         self.on_status_update = on_status_update
         self.on_indicators_update = on_indicators_update
         self.on_signal_update = on_signal_update
+        self.on_chart_update = on_chart_update
 
-        # Max length for raw 1s klines (e.g., for current price display, or very short-term patterns if ever needed)
-        self.raw_kline_max_len = 200 # e.g., around 3 minutes of 1s data
+        self.raw_kline_max_len = 200
         self.raw_all_kline_data_deque = deque(maxlen=self.raw_kline_max_len)
 
-        # Determine strategy timeframe properties
         self.strategy_timeframe_str = settings.STRATEGY_TIMEFRAME
-        # Ensure 'min' is used for 'T' if that's what pandas Timedelta expects for minute.
-        # Pandas Timedelta is quite flexible: '1T' or '1min' for minute, '1H' for hour.
-        # self.timeframe_delta = pd.Timedelta(self.strategy_timeframe_str.replace('T', 'min'))
-        # More robust timedelta string creation:
         td_str = self.strategy_timeframe_str.lower()
-        if 't' in td_str and not 'min' in td_str: # For minute timeframes like '15T' -> '15min'
+        if 't' in td_str and not 'min' in td_str:
             td_str = td_str.replace('t', 'min')
-        # 'h' for hours is already handled by .lower() if input was 'H'
         self.timeframe_delta = pd.Timedelta(td_str)
 
-        # Max length for aggregated klines (e.g., 100 bars of 1H data = 100 hours)
-        # This should be based on indicator needs on aggregated data.
-        # Max of MACD long period (26) + signal (9) = 35. Add buffer for other indicators like ATR (14), etc.
-        # A general rule might be longest_indicator_period + some_lookback_for_stability + buffer
-        # For example, if MACD (35 bars) and ATR (14 bars) are used, 35 + 14 + buffer (e.g., 10-20) = ~60-70
-        # Using ATR_PERIOD (14) + 50 = 64. This should be settings based or calculated.
-        # Let's make it more robust, e.g. max(MACD_LONG_PERIOD+MACD_SIGNAL_PERIOD, ATR_PERIOD) + buffer
-        buffer_for_indicators = 20 # Number of extra bars
+        buffer_for_indicators = 20
         min_bars_needed = max(
             (settings.MACD_LONG_PERIOD + settings.MACD_SIGNAL_PERIOD),
             settings.RSI_PERIOD,
-            settings.SUPERTREND_ATR_PERIOD, # Supertrend needs ATR
-            settings.KDJ_N_PERIOD, # KDJ main period
-            settings.ATR_PERIOD # General ATR
-            # SAR, Fractal, Momentum often need fewer bars than MACD or long ATRs
+            settings.SUPERTREND_ATR_PERIOD,
+            settings.KDJ_N_PERIOD,
+            settings.ATR_PERIOD
         )
         self.agg_kline_max_len = min_bars_needed + buffer_for_indicators
-
 
         self.agg_open_prices = deque(maxlen=self.agg_kline_max_len)
         self.agg_high_prices = deque(maxlen=self.agg_kline_max_len)
         self.agg_low_prices = deque(maxlen=self.agg_kline_max_len)
         self.agg_close_prices = deque(maxlen=self.agg_kline_max_len)
         self.agg_volumes = deque(maxlen=self.agg_kline_max_len)
-        self.agg_timestamps = deque(maxlen=self.agg_kline_max_len) # Start timestamp of the aggregated bar
-        self.agg_kline_data_deque = deque(maxlen=self.agg_kline_max_len) # Store full aggregated klines
+        self.agg_timestamps = deque(maxlen=self.agg_kline_max_len)
+        self.agg_kline_data_deque = deque(maxlen=self.agg_kline_max_len)
 
-        self.current_agg_kline_buffer = [] # Buffer for 1s klines for current aggregating bar
+        self.current_agg_kline_buffer = []
         self.last_agg_bar_start_time = None
-        self.is_historical_fill_active = False # Flag to control GUI updates during fill
-
+        self.is_historical_fill_active = False
 
         if self.on_status_update:
             self.on_status_update(f"[GoldenStrategy] Initialized for timeframe: {self.strategy_timeframe_str}. Agg history len: {self.agg_kline_max_len} (needs {min_bars_needed} for indicators).")
 
     def _process_incoming_kline(self, kline_data):
-        """
-        Handles an incoming 1-second kline: stores it raw and adds to aggregation buffer.
-        Triggers aggregation if a new timeframe bar is completed.
-        """
         try:
             k_time_ms = int(kline_data['t'])
             k_time_dt = pd.to_datetime(k_time_ms, unit='ms', utc=True)
@@ -86,8 +66,8 @@ class GoldenStrategy:
             k_volume = float(kline_data['v'])
 
             processed_kline = {
-                't_ms': k_time_ms, # Keep original ms timestamp
-                't_dt': k_time_dt, # Store datetime object
+                't_ms': k_time_ms,
+                't_dt': k_time_dt,
                 'o': k_open, 'h': k_high,
                 'l': k_low, 'c': k_close, 'v': k_volume
             }
@@ -121,13 +101,12 @@ class GoldenStrategy:
                     k for k in self.current_agg_kline_buffer if k['t_dt'] >= current_kline_agg_period_start_time
                 ]
             else:
-                if self.on_status_update: # Log if a bar was expected but no klines were in its period
+                if self.on_status_update:
                     self.on_status_update(f"[GoldenStrategy] Potential data gap or timing issue: No klines found for completed bar period {self.last_agg_bar_start_time.strftime('%Y-%m-%d %H:%M:%S')}.")
 
             self.last_agg_bar_start_time = current_kline_agg_period_start_time
 
     def _finalize_and_process_aggregated_bar(self, bar_klines, bar_start_time_dt):
-        """Aggregates klines for a completed bar and triggers strategy logic."""
         if not bar_klines:
             return
 
@@ -145,7 +124,7 @@ class GoldenStrategy:
         self.agg_timestamps.append(bar_start_time_dt)
 
         aggregated_kline_data = {
-            't': int(bar_start_time_dt.timestamp() * 1000), # Millisecond timestamp for DataFrame consistency
+            't': int(bar_start_time_dt.timestamp() * 1000),
             'ts_datetime': bar_start_time_dt,
             'o': agg_open, 'h': agg_high, 'l': agg_low, 'c': agg_close, 'v': agg_volume
         }
@@ -156,39 +135,61 @@ class GoldenStrategy:
 
         self._run_strategy_on_aggregated_data()
 
-
     def _run_strategy_on_aggregated_data(self):
-        """
-        Calculates indicators and generates signals based on the aggregated data.
-        """
         min_agg_bars_for_strategy = max(
             (settings.MACD_LONG_PERIOD + settings.MACD_SIGNAL_PERIOD),
             settings.RSI_PERIOD,
             settings.SUPERTREND_ATR_PERIOD,
             settings.KDJ_N_PERIOD,
             settings.ATR_PERIOD
-        ) + 5 # Use a small buffer over the absolute minimum needed by any indicator
+        ) + 5
 
         if len(self.agg_close_prices) < min_agg_bars_for_strategy:
             status_msg_waiting = f"[GoldenStrategy] Collecting more AGGREGATED bars... ({len(self.agg_close_prices)}/{min_agg_bars_for_strategy}) for {self.strategy_timeframe_str} timeframe"
             if self.on_status_update:
                 self.on_status_update(status_msg_waiting)
-            # Send a 'waiting' state to GUI if not in historical fill
             if not self.is_historical_fill_active:
                 if self.on_indicators_update:
                     self.on_indicators_update({
                         'timeframe': self.strategy_timeframe_str,
                         'status': f"Waiting for {min_agg_bars_for_strategy - len(self.agg_close_prices)} more '{self.strategy_timeframe_str}' bars..."
                     })
-                if self.on_signal_update: # Also update signal display to show waiting
+                if self.on_signal_update:
                     self.on_signal_update(f"Waiting for data on {self.strategy_timeframe_str}...")
-            return # Return early
+            return
 
         close_series = pd.Series(list(self.agg_close_prices))
         high_series = pd.Series(list(self.agg_high_prices))
         low_series = pd.Series(list(self.agg_low_prices))
 
         historical_agg_df_for_analysis = pd.DataFrame(list(self.agg_kline_data_deque))
+
+        if self.on_chart_update and not self.agg_kline_data_deque.maxlen == 0 and len(self.agg_kline_data_deque) > 1 :
+            chart_df_data = []
+            for kline in self.agg_kline_data_deque:
+                chart_df_data.append({
+                    'Timestamp': kline.get('ts_datetime'),
+                    'Open': kline.get('o'),
+                    'High': kline.get('h'),
+                    'Low': kline.get('l'),
+                    'Close': kline.get('c'),
+                    'Volume': kline.get('v')
+                })
+            if chart_df_data:
+                try:
+                    chart_df = pd.DataFrame(chart_df_data)
+                    chart_df.set_index('Timestamp', inplace=True)
+                    for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                        chart_df[col] = pd.to_numeric(chart_df[col], errors='coerce')
+                    chart_df.dropna(subset=['Open', 'High', 'Low', 'Close'], inplace=True)
+
+                    if not chart_df.empty and not self.is_historical_fill_active :
+                        self.on_chart_update(chart_df)
+                    elif chart_df.empty and self.on_status_update and not self.is_historical_fill_active:
+                        self.on_status_update('[GoldenStrategy] Chart DataFrame became empty after processing for live update.')
+                except Exception as e_chart_df:
+                    logger.error(f'[GoldenStrategy] Error preparing DataFrame for chart: {e_chart_df}', exc_info=True)
+                    if self.on_status_update and not self.is_historical_fill_active: self.on_status_update(f'[GoldenStrategy] Error preparing chart data: {e_chart_df}')
 
         macd_data = calculator.calculate_macd(close_series, short_period=settings.MACD_SHORT_PERIOD, long_period=settings.MACD_LONG_PERIOD, signal_period=settings.MACD_SIGNAL_PERIOD)
         rsi_data = calculator.calculate_rsi(close_series, period=settings.RSI_PERIOD)
@@ -243,151 +244,302 @@ class GoldenStrategy:
                 tp_info = f", TP: {signal.get('tp'):.2f}" if signal.get('tp') is not None else ""
                 sl_info = f", SL: {signal.get('sl'):.2f}" if signal.get('sl') is not None else ""
                 self.on_signal_update(f"({self.strategy_timeframe_str}) {signal['type']} @ {signal['price']:.2f}{tp_info}{sl_info}")
-            # Log signal regardless of historical fill, but GUI update is conditional
             logger.info(f"({self.strategy_timeframe_str}) Generated Signal: {signal} (HistoricalFillActive: {self.is_historical_fill_active})")
         else:
-            if self.on_status_update and not self.is_historical_fill_active: # Only log "no signal" for live bars
+            if self.on_status_update and not self.is_historical_fill_active:
                  self.on_status_update(f"[GoldenStrategy] ({self.strategy_timeframe_str}) No signal generated on this bar.")
 
     def process_new_kline(self, kline_data):
         self._process_incoming_kline(kline_data)
 
-    def _generate_signal(self, current_kline, indicators, analysis):
-        """
-        Develops the "Golden Strategy" heuristic logic.
-        Combines indicator signals and specialized analysis to generate trading signals.
-        Returns a dictionary like {'type': 'LONG'/'SHORT', 'price': entry_price, 'tp': take_profit_price} or None.
-        """
-        # Extracting latest values for convenience
-        macd = indicators.get('macd')
-        rsi = indicators.get('rsi') # This is a single float value
-        supertrend = indicators.get('supertrend') # Dict with 'last_trend', 'last_direction'
-        kdj = indicators.get('kdj') # Dict with 'K', 'D', 'J'
-        sar = indicators.get('sar') # Dict with 'last_sar', 'last_direction'
-        fractals = indicators.get('fractal') # Dict with 'last_bullish_price', 'last_bearish_price'
-        # momentum = indicators.get('momentum') # Single float value
+    # --- Signal Generation Helper Methods ---
+
+    def _get_indicator_state(self, value, neutral_low, neutral_high, strong_threshold=None, weak_threshold=None):
+        # This is a placeholder concept, each indicator will have more specific logic
+        if value is None: return 'NEUTRAL'
+        if strong_threshold:
+            if value >= strong_threshold: return 'VERY_STRONG_BULLISH'
+            if value <= -strong_threshold: return 'VERY_STRONG_BEARISH'
+        if weak_threshold:
+            if value > neutral_high and value < weak_threshold : return 'WEAK_BULLISH'
+            if value < neutral_low and value > -weak_threshold: return 'WEAK_BEARISH'
+        if value > neutral_high: return 'BULLISH'
+        if value < neutral_low: return 'BEARISH'
+        return 'NEUTRAL'
+
+    def _assess_trend_filters(self, supertrend, sar, current_price):
+        st_trend = 'NEUTRAL'
+        sar_trend = 'NEUTRAL'
+
+        if supertrend and supertrend.get('last_direction') is not None:
+            if supertrend['last_direction'] == 1: st_trend = 'BULLISH'
+            elif supertrend['last_direction'] == -1: st_trend = 'BEARISH'
+
+        if sar and sar.get('last_sar') is not None and current_price is not None:
+            if current_price > sar['last_sar']: sar_trend = 'BULLISH'
+            elif current_price < sar['last_sar']: sar_trend = 'BEARISH'
+
+        if st_trend == 'BULLISH' and sar_trend == 'BULLISH': return 'STRONG_BULLISH_TREND'
+        if st_trend == 'BEARISH' and sar_trend == 'BEARISH': return 'STRONG_BEARISH_TREND'
+        if st_trend == 'BULLISH': return 'BULLISH_TREND_ST'
+        if st_trend == 'BEARISH': return 'BEARISH_TREND_ST'
+        if sar_trend == 'BULLISH': return 'BULLISH_TREND_SAR'
+        if sar_trend == 'BEARISH': return 'BEARISH_TREND_SAR'
+        return 'NEUTRAL_TREND'
+
+    def _assess_macd(self, macd_data):
+        if not macd_data or macd_data.get('macd') is None or macd_data.get('signal') is None or macd_data.get('histogram') is None:
+            return 'NEUTRAL'
+        macd_line, signal_line, histogram = macd_data['macd'], macd_data['signal'], macd_data['histogram']
+        hist_strength_threshold = getattr(settings, 'MACD_HIST_STRENGTH_THRESHOLD', 0.0001) # Example
+
+        if macd_line > signal_line and histogram > 0:
+            return 'STRONG_BULLISH' if histogram > hist_strength_threshold else 'BULLISH'
+        if macd_line < signal_line and histogram < 0:
+            return 'STRONG_BEARISH' if histogram < -hist_strength_threshold else 'BEARISH'
+        if histogram > 0: return 'WEAK_BULLISH'
+        if histogram < 0: return 'WEAK_BEARISH'
+        return 'NEUTRAL'
+
+    def _assess_rsi(self, rsi_data):
+        if rsi_data is None: return 'NEUTRAL'
+        ob = settings.STRATEGY_RSI_OVERBOUGHT
+        os = settings.STRATEGY_RSI_OVERSOLD
+        bc = getattr(settings, 'RSI_BULLISH_CONFIRM', 55)
+        sc = getattr(settings, 'RSI_BEARISH_CONFIRM', 45)
+        if rsi_data >= ob: return 'OVERBOUGHT'
+        if rsi_data <= os: return 'OVERSOLD'
+        if rsi_data >= bc: return 'BULLISH'
+        if rsi_data <= sc: return 'BEARISH'
+        return 'NEUTRAL'
+
+    def _assess_kdj(self, kdj_data):
+        if not kdj_data or kdj_data.get('K') is None or kdj_data.get('D') is None or kdj_data.get('J') is None:
+            return 'NEUTRAL'
+        k, d, j = kdj_data['K'], kdj_data['D'], kdj_data['J']
+        j_overbought = getattr(settings, 'KDJ_J_OVERBOUGHT', 90)
+        j_oversold = getattr(settings, 'KDJ_J_OVERSOLD', 10)
+        k_confirm_ob = getattr(settings, 'KDJ_K_CONFIRM_OVERBOUGHT', 80)
+        k_confirm_os = getattr(settings, 'KDJ_K_CONFIRM_OVERSOLD', 20)
+
+
+        if j > j_overbought or (j > k_confirm_ob and k > k_confirm_ob): return 'OVERBOUGHT'
+        if j < j_oversold or (j < k_confirm_os and k < k_confirm_os): return 'OVERSOLD'
+        if k > d and j < j_overbought : return 'BULLISH'
+        if k < d and j > j_oversold : return 'BEARISH'
+        return 'NEUTRAL'
+
+    def _assess_fractals(self, fractal_data, current_high, current_low):
+        if not fractal_data or current_high is None or current_low is None: return 'NEUTRAL'
+        last_bearish_f = fractal_data.get('last_bearish_price')
+        last_bullish_f = fractal_data.get('last_bullish_price')
+        if last_bearish_f and current_high > last_bearish_f: return 'BROKE_BEARISH_FRACTAL_UP'
+        if last_bullish_f and current_low < last_bullish_f: return 'BROKE_BULLISH_FRACTAL_DOWN'
+        return 'NEUTRAL'
+
+    def _assess_sr_levels(self, current_price, current_low, current_high, pivots, fib_analysis, liquidity_zones):
+        if current_price is None: return 'NEUTRAL_SR'
+        prox_factor = getattr(settings, 'SR_PROXIMITY_FACTOR', 0.003)
+
+        if pivots and pivots.get('daily_pivots'):
+            s1 = pivots['daily_pivots'].get('S1')
+            r1 = pivots['daily_pivots'].get('R1')
+            if s1 and current_low <= s1 * (1 + prox_factor) and current_price > s1: return 'BOUNCE_SUPPORT_PIVOT'
+            if r1 and current_high >= r1 * (1 - prox_factor) and current_price < r1: return 'REJECT_RESISTANCE_PIVOT'
+            if r1 and current_price > r1 : return 'BREAKOUT_ABOVE_R1_PIVOT'
+            if s1 and current_price < s1 : return 'BREAKDOWN_BELOW_S1_PIVOT'
+
+        if fib_analysis and fib_analysis.get('retracement_levels_A_to_B'):
+            levels = fib_analysis['retracement_levels_A_to_B']
+            for fib_val_key in [0.5, 0.618]:
+                fib_level_price = levels.get(fib_val_key)
+                if fib_level_price:
+                    if fib_analysis.get('trend_type') == 'uptrend' and current_low <= fib_level_price * (1 + prox_factor) and current_price > fib_level_price: return 'BOUNCE_SUPPORT_FIB'
+                    if fib_analysis.get('trend_type') == 'downtrend' and current_high >= fib_level_price * (1 - prox_factor) and current_price < fib_level_price: return 'REJECT_RESISTANCE_FIB'
+
+        if liquidity_zones and liquidity_zones.get('volume_profile_data', {}).get('high_volume_zones'):
+            for zone in liquidity_zones['volume_profile_data']['high_volume_zones'][:1]:
+                zone_price = zone['price_level']
+                if current_low <= zone_price * (1 + prox_factor) and current_price > zone_price: return 'BOUNCE_SUPPORT_LIQ'
+                if current_high >= zone_price * (1 - prox_factor) and current_price < zone_price: return 'REJECT_RESISTANCE_LIQ'
+        return 'NEUTRAL_SR'
+
+    def _assess_volume(self, current_agg_kline, agg_volume_series):
+        if current_agg_kline is None or not hasattr(agg_volume_series, 'mean') or agg_volume_series.empty: return 'NEUTRAL_VOLUME'
+        current_vol = current_agg_kline.get('v')
+        if current_vol is None or len(agg_volume_series) < 5: return 'NEUTRAL_VOLUME'
+
+        avg_vol_window = min(getattr(settings, 'VOLUME_AVG_PERIOD', 20), max(1, len(agg_volume_series)-1) )
+        avg_vol = agg_volume_series.rolling(window=avg_vol_window, min_periods=1).mean().iloc[-1]
+
+        vol_high_multiplier = getattr(settings, 'VOLUME_HIGH_MULTIPLIER', 1.5)
+        vol_low_multiplier = getattr(settings, 'VOLUME_LOW_MULTIPLIER', 0.7)
+
+        if avg_vol == 0 :
+            return 'HIGH_VOLUME' if current_vol > 0 else 'NEUTRAL_VOLUME'
+
+        if current_vol > avg_vol * vol_high_multiplier: return 'HIGH_VOLUME'
+        if current_vol < avg_vol * vol_low_multiplier: return 'LOW_VOLUME'
+        return 'AVERAGE_VOLUME'
+
+    # --- End Signal Generation Helper Methods ---
+
+    def _calculate_tp_sl(self, signal_type, entry_price, current_kline_low, current_kline_high, indicators, analysis):
+        """ Helper to calculate TP and SL based on current logic. """
         atr_value = indicators.get('atr')
+        pivots_data = analysis.get('pivots', {}).get('daily_pivots')
 
-        pivots = analysis.get('pivots', {}).get('daily_pivots') # e.g. {'P': val, 'S1': val, ...}
-        # fib_levels = analysis.get('fibonacci', {}).get('retracement_levels_from_B')
-        liquidity_zones = analysis.get('liquidity', {}).get('volume_profile_data', {}).get('high_volume_zones', []) # List of {'price_level': val, 'volume': val}
+        take_profit = None
+        stop_loss = None
 
+        price_buffer_factor = getattr(settings, 'SL_PRICE_BUFFER_ATR_FACTOR', 0.1)
+
+        # --- Stop Loss Calculation ---
+        sl_atr_defined = False
+        if atr_value is not None and atr_value > 0:
+            sl_distance = settings.ATR_SL_MULTIPLIER * atr_value
+            price_buffer = atr_value * price_buffer_factor
+
+            if signal_type == "LONG":
+                sl_atr = entry_price - sl_distance
+                stop_loss = min(sl_atr, current_kline_low - price_buffer)
+            elif signal_type == "SHORT":
+                sl_atr = entry_price + sl_distance
+                stop_loss = max(sl_atr, current_kline_high + price_buffer)
+            sl_atr_defined = True
+
+        if not sl_atr_defined:
+            if signal_type == "LONG":
+                stop_loss = entry_price * (1 - settings.MIN_SL_FALLBACK_PERCENTAGE)
+            else: # SHORT
+                stop_loss = entry_price * (1 + settings.MIN_SL_FALLBACK_PERCENTAGE)
+
+        # --- Take Profit Calculation ---
+        tp_atr_defined = False
+        if atr_value is not None and atr_value > 0:
+            tp_distance = settings.ATR_TP_MULTIPLIER * atr_value
+            if signal_type == "LONG":
+                take_profit = entry_price + tp_distance
+            elif signal_type == "SHORT":
+                take_profit = entry_price - tp_distance
+            tp_atr_defined = True
+
+        if pivots_data:
+            if signal_type == "LONG" and pivots_data.get('R1'):
+                tp_pivot = pivots_data['R1']
+                if not tp_atr_defined or (tp_pivot > entry_price and tp_pivot < (take_profit if tp_atr_defined else float('inf'))):
+                    if take_profit is None or (tp_pivot < take_profit):
+                         pass
+            elif signal_type == "SHORT" and pivots_data.get('S1'):
+                tp_pivot = pivots_data['S1']
+                if not tp_atr_defined or (tp_pivot < entry_price and tp_pivot > (take_profit if tp_atr_defined else float('-inf'))):
+                         pass
+
+        if not tp_atr_defined and take_profit is None:
+            if signal_type == "LONG":
+                take_profit = entry_price * (1 + settings.MIN_TP_FALLBACK_PERCENTAGE)
+            else: # SHORT
+                take_profit = entry_price * (1 - settings.MIN_TP_FALLBACK_PERCENTAGE)
+
+        if signal_type == "LONG":
+            if take_profit <= entry_price: take_profit = entry_price * (1 + settings.MIN_TP_DISTANCE_PERCENTAGE)
+            if stop_loss >= entry_price: stop_loss = entry_price * (1 - settings.MIN_SL_DISTANCE_PERCENTAGE)
+        elif signal_type == "SHORT":
+            if take_profit >= entry_price: take_profit = entry_price * (1 - settings.MIN_TP_DISTANCE_PERCENTAGE)
+            if stop_loss <= entry_price: stop_loss = entry_price * (1 + settings.MIN_SL_DISTANCE_PERCENTAGE)
+
+        if stop_loss is not None and take_profit is not None and stop_loss != entry_price:
+            reward_abs = abs(take_profit - entry_price)
+            risk_abs = abs(entry_price - stop_loss)
+            if risk_abs > 0:
+                current_rr = reward_abs / risk_abs
+                if current_rr < settings.MIN_RR_RATIO:
+                    if self.on_status_update and not self.is_historical_fill_active:
+                        self.on_status_update(f"[StrategySignal] ({self.strategy_timeframe_str}) {signal_type} signal R/R ratio {current_rr:.2f} < min {settings.MIN_RR_RATIO}. TP={take_profit:.2f}, SL={stop_loss:.2f}. Signal invalidated.")
+                    return None, None
+            else:
+                if self.on_status_update and not self.is_historical_fill_active:
+                     self.on_status_update(f"[StrategySignal] ({self.strategy_timeframe_str}) {signal_type} SL is at entry or invalid. R/R undefined or invalid. TP={take_profit:.2f}, SL={stop_loss:.2f}. Signal invalidated.")
+                return None, None
+
+
+        return take_profit, stop_loss
+
+    def _generate_signal(self, current_kline, indicators, analysis): # current_kline is an aggregated kline dict
+        """
+        Refactored signal generation logic.
+        Combines states from helper assessment methods to find confluence.
+        """
         current_price = float(current_kline['c'])
         current_high = float(current_kline['h'])
         current_low = float(current_kline['l'])
 
-        # --- Initial Heuristic Logic for "Golden Strategy" (First Pass) ---
-        # This is a simplified example and needs significant expansion and tuning.
-        # The goal is to combine multiple criteria.
+        trend_state = self._assess_trend_filters(indicators.get('supertrend'), indicators.get('sar'), current_price)
+        macd_state = self._assess_macd(indicators.get('macd'))
+        rsi_state = self._assess_rsi(indicators.get('rsi'))
+        kdj_state = self._assess_kdj(indicators.get('kdj'))
+        fractal_assessment = self._assess_fractals(indicators.get('fractal'), current_high, current_low)
+        sr_level_assessment = self._assess_sr_levels(current_price, current_low, current_high,
+                                                     analysis.get('pivots'),
+                                                     analysis.get('fibonacci'),
+                                                     analysis.get('liquidity'))
 
-        long_score = 0
-        short_score = 0
+        agg_volume_series = pd.Series(list(self.agg_volumes)) if self.agg_volumes else pd.Series([], dtype=float)
+        volume_assessment = self._assess_volume(current_kline, agg_volume_series)
 
-        # 1. Supertrend Direction
-        if supertrend and supertrend['last_direction'] == 1:
-            long_score += 2
-        elif supertrend and supertrend['last_direction'] == -1:
-            short_score += 2
+        if self.on_status_update and not self.is_historical_fill_active:
+            log_msg_parts = [
+                f"Trend={trend_state}", f"MACD={macd_state}", f"RSI={rsi_state}",
+                f"KDJ={kdj_state}", f"Fractal={fractal_assessment}",
+                f"S/R={sr_level_assessment}", f"Vol={volume_assessment}"
+            ]
+            self.on_status_update(f"[StrategyDebug] ({self.strategy_timeframe_str}) States: {', '.join(log_msg_parts)}")
 
-        # 2. RSI
-        if rsi is not None:
-            if rsi > 50 and rsi < settings.STRATEGY_RSI_OVERBOUGHT: # Bullish momentum, not overbought
-                long_score += 1
-            elif rsi < 50 and rsi > settings.STRATEGY_RSI_OVERSOLD: # Bearish momentum, not oversold
-                short_score += 1
-            if rsi >= settings.STRATEGY_RSI_OVERBOUGHT: # Overbought - potential reversal or strong trend
-                short_score += 0.5 # Slight negative for long, potential top
-            if rsi <= settings.STRATEGY_RSI_OVERSOLD: # Oversold - potential reversal or strong trend
-                long_score += 0.5  # Slight negative for short, potential bottom
+        is_long_signal = False
+        if (trend_state == 'STRONG_BULLISH_TREND' or trend_state == 'BULLISH_TREND_ST'):
+            if (macd_state == 'STRONG_BULLISH' or macd_state == 'BULLISH') and \
+               (rsi_state == 'BULLISH' and rsi_state != 'OVERBOUGHT') and \
+               (kdj_state == 'BULLISH' or kdj_state == 'OVERSOLD'):
+                sr_confirms_long = sr_level_assessment in ['BOUNCE_SUPPORT_PIVOT', 'BOUNCE_SUPPORT_FIB', 'BOUNCE_SUPPORT_LIQ', 'BREAKOUT_ABOVE_R1_PIVOT']
+                fractal_confirms_long = fractal_assessment == 'BROKE_BEARISH_FRACTAL_UP'
+                volume_supports_move = volume_assessment in ['AVERAGE_VOLUME', 'HIGH_VOLUME']
+                if sr_confirms_long and volume_supports_move:
+                    is_long_signal = True
+                    if self.on_status_update and not self.is_historical_fill_active: self.on_status_update(f"[StrategySignal] LONG Condition Met (Trend + Momentum + S/R_Bounce/Break + Volume). Fractal: {fractal_assessment}")
+                elif fractal_confirms_long and volume_supports_move and sr_level_assessment == 'NEUTRAL_SR':
+                    is_long_signal = True
+                    if self.on_status_update and not self.is_historical_fill_active: self.on_status_update(f"[StrategySignal] LONG Condition Met (Trend + Momentum + Fractal_Break + Volume). S/R: {sr_level_assessment}")
 
-        # 3. MACD
-        if macd and macd['macd'] is not None and macd['signal'] is not None:
-            if macd['macd'] > macd['signal'] and macd['histogram'] > 0: # Bullish cross or divergence
-                long_score += 1
-            elif macd['macd'] < macd['signal'] and macd['histogram'] < 0: # Bearish cross or divergence
-                short_score += 1
-
-        # 4. KDJ (J value for overbought/oversold or trend strength)
-        if kdj and kdj['J'] is not None:
-            if kdj['J'] < 20 and kdj['K'] > kdj['D']: # Oversold, potential bullish cross forming
-                long_score += 0.5
-            if kdj['J'] > 80 and kdj['K'] < kdj['D']: # Overbought, potential bearish cross forming
-                short_score += 0.5
-
-        # 5. Parabolic SAR
-        if sar and sar['last_sar'] is not None:
-            if sar['last_direction'] == 1: # SAR is bullish (below price)
-                long_score += 1
-            elif sar['last_direction'] == -1: # SAR is bearish (above price)
-                short_score += 1
-
-        # 6. Pivot Point Proximity (Example: current price near a support for long, resistance for short)
-        if pivots:
-            if abs(current_price - pivots.get('S1', current_price)) / current_price < 0.005: # Near S1 (0.5%)
-                long_score += 1
-            if abs(current_price - pivots.get('R1', current_price)) / current_price < 0.005: # Near R1 (0.5%)
-                short_score += 1
-
-        # 7. Liquidity Zones (Example: price bouncing off a high volume zone)
-        if liquidity_zones:
-            for zone in liquidity_zones[:1]: # Check top 1 liquidity zone
-                if current_low <= zone['price_level'] and current_price > zone['price_level'] and \
-                   abs(current_price - zone['price_level']) / current_price < 0.01: # Bounced off support
-                    long_score += 1
-                if current_high >= zone['price_level'] and current_price < zone['price_level'] and \
-                   abs(current_price - zone['price_level']) / current_price < 0.01: # Rejected from resistance
-                    short_score += 1
-
-
-        # Decision Threshold (needs tuning)
-        entry_threshold = settings.STRATEGY_ENTRY_THRESHOLD
-        signal_type = None
-        entry_price = current_price
-        take_profit = None
-        stop_loss = None
-        atr_tp_multiplier = settings.ATR_TP_MULTIPLIER
-        atr_sl_multiplier = settings.ATR_SL_MULTIPLIER
-
-        if long_score >= entry_threshold and long_score > short_score:
+        if is_long_signal:
             signal_type = "LONG"
             entry_price = current_price
-            if atr_value is not None and atr_value > 0:
-                take_profit = entry_price + (atr_tp_multiplier * atr_value)
-                stop_loss = entry_price - (atr_sl_multiplier * atr_value)
-            elif pivots and pivots.get('R1'): # Fallback to Pivot R1 if ATR fails
-                 take_profit = pivots.get('R1')
-                 stop_loss = entry_price * (1 - settings.MIN_SL_FALLBACK_PERCENTAGE)
-            else: # Further fallback
-                 take_profit = entry_price * (1 + settings.MIN_TP_FALLBACK_PERCENTAGE)
-                 stop_loss = entry_price * (1 - settings.MIN_SL_FALLBACK_PERCENTAGE)
+            take_profit, stop_loss = self._calculate_tp_sl(signal_type, entry_price, current_low, current_high, indicators, analysis)
+            if take_profit is not None and stop_loss is not None:
+                debug_states = { "trend": trend_state, "macd": macd_state, "rsi": rsi_state, "kdj": kdj_state, "fractal": fractal_assessment, "sr": sr_level_assessment, "volume": volume_assessment }
+                return {'type': signal_type, 'price': entry_price, 'tp': take_profit, 'sl': stop_loss, 'debug_states': debug_states}
 
-        elif short_score >= entry_threshold and short_score > long_score:
+        is_short_signal = False
+        if (trend_state == 'STRONG_BEARISH_TREND' or trend_state == 'BEARISH_TREND_ST'):
+            if (macd_state == 'STRONG_BEARISH' or macd_state == 'BEARISH') and \
+               (rsi_state == 'BEARISH' and rsi_state != 'OVERSOLD') and \
+               (kdj_state == 'BEARISH' or kdj_state == 'OVERBOUGHT'):
+                sr_confirms_short = sr_level_assessment in ['REJECT_RESISTANCE_PIVOT', 'REJECT_RESISTANCE_FIB', 'REJECT_RESISTANCE_LIQ', 'BREAKDOWN_BELOW_S1_PIVOT']
+                fractal_confirms_short = fractal_assessment == 'BROKE_BULLISH_FRACTAL_DOWN'
+                volume_supports_move = volume_assessment in ['AVERAGE_VOLUME', 'HIGH_VOLUME']
+                if sr_confirms_short and volume_supports_move:
+                    is_short_signal = True
+                    if self.on_status_update and not self.is_historical_fill_active: self.on_status_update(f"[StrategySignal] SHORT Condition Met (Trend + Momentum + S/R_Rejection/Breakdown + Volume). Fractal: {fractal_assessment}")
+                elif fractal_confirms_short and volume_supports_move and sr_level_assessment == 'NEUTRAL_SR':
+                    is_short_signal = True
+                    if self.on_status_update and not self.is_historical_fill_active: self.on_status_update(f"[StrategySignal] SHORT Condition Met (Trend + Momentum + Fractal_Breakdown + Volume). S/R: {sr_level_assessment}")
+
+        if is_short_signal:
             signal_type = "SHORT"
             entry_price = current_price
-            if atr_value is not None and atr_value > 0:
-                take_profit = entry_price - (atr_tp_multiplier * atr_value)
-                stop_loss = entry_price + (atr_sl_multiplier * atr_value)
-            elif pivots and pivots.get('S1'): # Fallback to Pivot S1
-                 take_profit = pivots.get('S1')
-                 stop_loss = entry_price * (1 + settings.MIN_SL_FALLBACK_PERCENTAGE)
-            else: # Further fallback
-                 take_profit = entry_price * (1 - settings.MIN_TP_FALLBACK_PERCENTAGE)
-                 stop_loss = entry_price * (1 + settings.MIN_SL_FALLBACK_PERCENTAGE)
-
-        if signal_type:
-            # Ensure TP/SL are reasonably away from entry price and logical
-            if signal_type == "LONG":
-                if take_profit is not None and take_profit <= entry_price:
-                    take_profit = entry_price * (1 + settings.MIN_TP_DISTANCE_PERCENTAGE)
-                if stop_loss is not None and stop_loss >= entry_price:
-                    stop_loss = entry_price * (1 - settings.MIN_SL_DISTANCE_PERCENTAGE)
-            elif signal_type == "SHORT":
-                if take_profit is not None and take_profit >= entry_price:
-                    take_profit = entry_price * (1 - settings.MIN_TP_DISTANCE_PERCENTAGE)
-                if stop_loss is not None and stop_loss <= entry_price:
-                    stop_loss = entry_price * (1 + settings.MIN_SL_DISTANCE_PERCENTAGE)
-
-            return {'type': signal_type, 'price': entry_price, 'tp': take_profit, 'sl': stop_loss, 'long_score': long_score, 'short_score': short_score}
+            take_profit, stop_loss = self._calculate_tp_sl(signal_type, entry_price, current_low, current_high, indicators, analysis)
+            if take_profit is not None and stop_loss is not None:
+                debug_states = { "trend": trend_state, "macd": macd_state, "rsi": rsi_state, "kdj": kdj_state, "fractal": fractal_assessment, "sr": sr_level_assessment, "volume": volume_assessment }
+                return {'type': signal_type, 'price': entry_price, 'tp': take_profit, 'sl': stop_loss, 'debug_states': debug_states}
 
         return None
 
@@ -395,83 +547,58 @@ class GoldenStrategy:
 if __name__ == '__main__':
     print("--- Testing GoldenStrategy Integration ---")
 
-    # def mock_status_update(message):
-    #     # Limit printing for cleaner test output during normal runs
-    #     if "Collecting more data" not in message or "Generating signal" not in message:
-    #          print(f"STATUS_UPDATE: {message}")
-    # For this test, let's see more status updates for aggregation
     def mock_status_update(message):
         print(f"STATUS_UPDATE: {message}")
 
 
     strategy = GoldenStrategy(on_status_update=mock_status_update,
                               on_indicators_update=lambda ind_data: print(f"INDICATORS_UPDATE: {ind_data}"),
-                              on_signal_update=lambda sig_data: print(f"SIGNAL_UPDATE: {sig_data}"))
+                              on_signal_update=lambda sig_data: print(f"SIGNAL_UPDATE: {sig_data}"),
+                              on_chart_update=lambda chart_df: print(f"CHART_UPDATE: DataFrame with {len(chart_df)} rows"))
 
-    # Simulate receiving kline data points (1-second klines)
-    # Test with STRATEGY_TIMEFRAME = "1T" (1 minute) for faster testing of aggregation
     original_timeframe = settings.STRATEGY_TIMEFRAME
-    settings.STRATEGY_TIMEFRAME = "1T" # Override for this test
+    settings.STRATEGY_TIMEFRAME = "1T"
     print(f"TEST: Overriding STRATEGY_TIMEFRAME to {settings.STRATEGY_TIMEFRAME} for this test run.")
+    # Re-initialize strategy with the new timeframe for the test
     strategy = GoldenStrategy(on_status_update=mock_status_update,
                               on_indicators_update=lambda ind_data: print(f"INDICATORS_UPDATE: {ind_data}"),
-                              on_signal_update=lambda sig_data: print(f"SIGNAL_UPDATE: {sig_data}"))
+                              on_signal_update=lambda sig_data: print(f"SIGNAL_UPDATE: {sig_data}"),
+                              on_chart_update=lambda chart_df: print(f"CHART_UPDATE: DataFrame with {len(chart_df)} rows"))
 
-
-    # Generate 3 minutes of 1-second data
-    # Max length for aggregated klines (e.g., 100 bars of 1H data = 100 hours)
-    # self.agg_kline_max_len = settings.ATR_PERIOD + 50
-    # min_agg_bars_for_strategy = settings.ATR_PERIOD + 20
-    # Need enough data for min_agg_bars_for_strategy (14+20=34 bars of 1T) -> 34 minutes
-    # So we need at least 34 * 60 = 2040 seconds of data. Let's do 2100 (35 mins).
-
-    num_seconds_to_simulate = (settings.ATR_PERIOD + 25) * 60 # (14+25)*60 = 39 * 60 = 2340 seconds
+    num_seconds_to_simulate = (settings.ATR_PERIOD + 25) * 60
 
     base_price = 20000
     klines_to_test = []
     start_time_ms = int(pd.Timestamp('2023-01-01 00:00:00', tz='UTC').value / 10**6)
 
     for i in range(num_seconds_to_simulate):
-        price_change = (i % 10 - 4.5) * 0.1 # Small price fluctuations per second
-
+        price_change = (i % 10 - 4.5) * 0.1
         current_time_ms = start_time_ms + i * 1000
-
-        # Simulate a daily pattern for pivot testing (highs/lows change over a day)
-        # This is very rough, pivots are calculated on previous day's data.
-        # The main goal here is to test aggregation.
-        day_cycle = (i // (60*60*4)) % 2 # Change general price trend every 4 hours for variety
+        day_cycle = (i // (60*60*4)) % 2
         if day_cycle == 0:
-            base_price_offset = (i % (60*10) - 300) * 0.1 # small up/down wave over 10 mins
+            base_price_offset = (i % (60*10) - 300) * 0.1
         else:
             base_price_offset = -(i % (60*10) - 300) * 0.1
-
 
         k_open = base_price + base_price_offset + price_change
         k_high = k_open + abs(price_change) + 5
         k_low = k_open - abs(price_change) - 5
         k_close = k_open + price_change / 2
-        k_volume = 1 + (i % 10) # Simple volume pattern
+        k_volume = 1 + (i % 10)
 
         k = {
             't': str(current_time_ms),
-            'o': f"{k_open:.2f}",
-            'h': f"{k_high:.2f}",
-            'l': f"{k_low:.2f}",
-            'c': f"{k_close:.2f}",
+            'o': f"{k_open:.2f}", 'h': f"{k_high:.2f}",
+            'l': f"{k_low:.2f}", 'c': f"{k_close:.2f}",
             'v': f"{k_volume:.2f}"
         }
         klines_to_test.append(k)
 
     print(f"Generated {len(klines_to_test)} 1-second klines for testing ({num_seconds_to_simulate/60:.1f} minutes).")
 
-    final_signal = None
     for idx, kline_data_point in enumerate(klines_to_test):
         strategy.process_new_kline(kline_data_point)
-        # Signals are now generated inside _run_strategy_on_aggregated_data
-        # which is called by _finalize_and_process_aggregated_bar
-        # We can't easily get the signal here directly unless we add a return to process_new_kline
-        # For testing, rely on the on_signal_update callback printing.
 
     print("\nGoldenStrategy aggregation test finished.")
-    settings.STRATEGY_TIMEFRAME = original_timeframe # Reset for other potential uses/tests
+    settings.STRATEGY_TIMEFRAME = original_timeframe
     print(f"TEST: Restored STRATEGY_TIMEFRAME to {settings.STRATEGY_TIMEFRAME}.")

@@ -36,27 +36,44 @@ STRATEGY_RSI_OVERBOUGHT = 70
 STRATEGY_ENTRY_THRESHOLD = 3.0 # Score needed to generate a signal
 ATR_TP_MULTIPLIER = 2.0 # Example: TP is 2 * ATR
 ATR_SL_MULTIPLIER = 1.5 # Example: SL is 1.5 * ATR
+MIN_RR_RATIO = 1.5 # Minimum Risk/Reward Ratio for a trade
+
+# --- Strategy Helper Parameters ---
+MACD_HIST_STRENGTH_THRESHOLD = 0.00005 # For BTCUSDT, adjust based on price volatility; small non-zero
+RSI_BULLISH_CONFIRM = 55.0
+RSI_BEARISH_CONFIRM = 45.0
+KDJ_J_OVERBOUGHT = 90.0
+KDJ_J_OVERSOLD = 10.0
+KDJ_K_CONFIRM_OVERBOUGHT = 80.0 # K value to confirm J's overbought
+KDJ_K_CONFIRM_OVERSOLD = 20.0 # K value to confirm J's oversold
+SR_PROXIMITY_FACTOR = 0.003 # 0.3% proximity to S/R levels for bounce/rejection
+VOLUME_AVG_PERIOD = 20 # Rolling average period for volume assessment
+VOLUME_HIGH_MULTIPLIER = 1.5 # Volume > X * average
+VOLUME_LOW_MULTIPLIER = 0.7  # Volume < X * average
+SL_PRICE_BUFFER_ATR_FACTOR = 0.1 # Factor of ATR to use as a buffer for SL placement beyond bar low/high
+
 
 # Timeframe for strategy calculations (e.g., '1T' for 1 minute, '5T', '15T', '1H', '4H')
 # Note: 'T' is pandas offset alias for minute. Use 'min' for pd.Timedelta, e.g. '1min', '60min'
 STRATEGY_TIMEFRAME = "1H"
 
 # Interval for DataFetcher to fetch klines (e.g., '1m', '5m', '1h') - must match Binance API options for websockets and historical data
-# For 1s data via WebSocket: fetcher.py currently hardcodes AsyncClient.KLINE_INTERVAL_1SECOND
-# This KLINE_FETCH_INTERVAL would be for the historical data fetch to match strategy aggregation, or if WS also changes.
-# The prompt implies this is for WS, but 1s is usually fetched for responsiveness if strategy is on higher TF.
-# Let's assume this is for the WebSocket kline interval if we make it configurable,
-# and historical data fetch will use this too.
-# For now, fetcher.py uses 1s for WebSocket. This setting might be for a different purpose or future refactor.
-# Let's assume it's for the base kline interval the strategy *could* receive if not 1s.
-# The prompt's fetcher code changes `start_fetching` to use this.
-KLINE_FETCH_INTERVAL = "1m" # Example: fetch 1-minute klines for WebSocket and historical.
+KLINE_FETCH_INTERVAL = "1m"
 
 # Number of STRATEGY_TIMEFRAME bars to pre-fill with historical data
-HISTORICAL_LOOKBACK_AGG_BARS_COUNT = 150 # e.g., 150 bars of STRATEGY_TIMEFRAME
+HISTORICAL_LOOKBACK_AGG_BARS_COUNT = 150
 
 # Minimum profit/loss percentages
 MIN_TP_DISTANCE_PERCENTAGE = 0.005  # 0.5% minimum distance for TP from entry
 MIN_SL_DISTANCE_PERCENTAGE = 0.005  # 0.5% minimum distance for SL from entry
 MIN_TP_FALLBACK_PERCENTAGE = 0.01   # 1% TP if ATR is not available
 MIN_SL_FALLBACK_PERCENTAGE = 0.01   # 1% SL if ATR is not available
+
+# Volume Profile & S/R Assessment (These were already present, moved SR_PROXIMITY_FACTOR, VOL_* under Strategy Helper)
+# SR_PROXIMITY_FACTOR = 0.003
+# VOLUME_AVG_PERIOD = 20
+# VOLUME_HIGH_MULTIPLIER = 1.5
+# VOLUME_LOW_MULTIPLIER = 0.7
+
+# Other strategy fine-tuning parameters (examples, can be added as needed)
+# SL_PRICE_BUFFER_ATR_FACTOR = 0.1 # This was moved up
