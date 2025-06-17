@@ -166,16 +166,14 @@ class DataFetcher:
         self.bsm = None
         self.socket = None
 
-    async def fetch_historical_klines(self, symbol_to_fetch, interval_for_api, lookback_start_str=None, limit=None, end_time_ms=None):
+    async def fetch_historical_klines(self, symbol_to_fetch, interval_for_api, lookback_start_str=None, limit=None): # Removed end_time_ms
         """
         Fetches historical kline data from Binance.
         symbol_to_fetch: The trading symbol (e.g., "BTCUSDT").
         interval_for_api: The kline interval string compatible with python-binance (e.g., AsyncClient.KLINE_INTERVAL_1MINUTE).
         lookback_start_str: A string like "10 days ago UTC", "200 hours ago UTC". Used if limit is None.
-        limit: Number of klines to fetch (max 1000 per call, library handles pagination for get_historical_klines if start_str is used for a long period).
-               If 'limit' is provided, 'lookback_start_str' is often ignored by underlying API if 'endTime' is also used.
-               To fetch the most recent 'limit' klines, provide 'limit' and optionally 'end_time_ms'.
-        end_time_ms: Unix timestamp in milliseconds for the end of the period (exclusive). If None, fetches up to most recent.
+        limit: Number of klines to fetch. If 'lookback_start_str' is also provided, 'limit' might be ignored or used by the library for pagination control.
+               If only 'limit' is provided, it fetches the most recent 'limit' klines.
 
         Returns: A list of processed kline dictionaries, or an empty list if an error occurs or no data.
                  Each kline dict: {'t': ms_timestamp, 'o': float, 'h': float, 'l': float, 'c': float, 'v': float}
@@ -200,26 +198,25 @@ class DataFetcher:
                  return [] # Or default to a small limit
             self.on_status_update(status_msg)
 
-        logger.info(f"Fetching historical data: Symbol={symbol_to_fetch}, Interval={interval_for_api}, Start={lookback_start_str}, Limit={limit}, EndTime={end_time_ms}")
+        logger.info(f"Fetching historical data: Symbol={symbol_to_fetch}, Interval={interval_for_api}, Start={lookback_start_str}, Limit={limit}")
 
         try:
-            if limit and not lookback_start_str: # Fetch last 'limit' klines
-                 # To get the most recent 'limit' klines, we can omit start_str and use limit.
-                 # If end_time_ms is provided, it fetches 'limit' klines ending before that time.
+            if lookback_start_str: # Prioritize lookback_start_str if provided
                 raw_klines = await self.client.get_historical_klines(
                     symbol=symbol_to_fetch,
                     interval=interval_for_api,
-                    limit=limit,
-                    endtime=end_time_ms # API uses 'endtime' (lowercase)
+                    start_str=lookback_start_str
+                    # Not passing limit here intentionally; let start_str define the range.
+                    # The library handles pagination and will fetch all klines from start_str to now.
+                    # If a specific end is needed, it would be 'end_str' or an equivalent timestamp for 'endtime'.
                 )
-            elif lookback_start_str: # Fetch from a point in the past until now (or end_time_ms)
+            elif limit: # Fetch last 'limit' klines if no lookback_start_str
                 raw_klines = await self.client.get_historical_klines(
                     symbol=symbol_to_fetch,
                     interval=interval_for_api,
-                    start_str=lookback_start_str,
-                    endtime=end_time_ms # API uses 'endtime' (lowercase)
+                    limit=limit
                 )
-            else: # Should not happen based on initial check, but as a safeguard
+            else:
                 logger.error("[DataFetcher] Invalid parameters for historical kline fetch.")
                 return []
 
@@ -253,7 +250,7 @@ class DataFetcher:
         else:
             if self.on_status_update:
                 self.on_status_update(f"[DataFetcher] No historical klines returned for {symbol_to_fetch} with given parameters.")
-            logger.info(f"No historical klines returned for {symbol_to_fetch} with params: interval={interval_for_api}, start={lookback_start_str}, limit={limit}, end={end_time_ms}")
+            logger.info(f"No historical klines returned for {symbol_to_fetch} with params: interval={interval_for_api}, start={lookback_start_str}, limit={limit}")
 
         return processed_klines
 
