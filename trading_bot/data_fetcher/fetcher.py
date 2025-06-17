@@ -1,5 +1,7 @@
 import asyncio
 import json
+import asyncio # For asyncio.TimeoutError
+import aiohttp # For aiohttp.ClientError
 from binance import AsyncClient, BinanceSocketManager
 import logging
 from trading_bot.utils import settings
@@ -51,12 +53,42 @@ class DataFetcher:
 
 
     async def _initialize_client(self):
+        if self.client:
+            return # Already initialized
+
         if self.on_status_update:
-            self.on_status_update(f"[DataFetcher] Initializing Asynchronous Client...")
-        self.client = await AsyncClient.create()
-        self.bsm = BinanceSocketManager(self.client)
-        if self.on_status_update:
-            self.on_status_update(f"[DataFetcher] AsyncClient and BinanceSocketManager initialized.")
+            self.on_status_update(f"[DataFetcher] Initializing API client (timeout: {settings.REQUEST_TIMEOUT}s)...")
+        logger.info(f"[DataFetcher] Initializing API client (timeout: {settings.REQUEST_TIMEOUT}s)...")
+
+        try:
+            # python-binance AsyncClient uses 'requests_timeout' parameter
+            self.client = await AsyncClient.create(requests_timeout=settings.REQUEST_TIMEOUT)
+            self.bsm = BinanceSocketManager(self.client)
+
+            # Perform a quick ping to ensure connectivity after creating client
+            await self.client.ping()
+            if self.on_status_update:
+                self.on_status_update("[DataFetcher] API Client initialized and ping successful.")
+            logger.info("[DataFetcher] API Client initialized and ping successful.")
+
+        except asyncio.TimeoutError: # Specifically catch asyncio.TimeoutError
+            self.client = None # Ensure client is None on failure
+            self.bsm = None
+            logger.error(f"[DataFetcher] API client initialization timed out after {settings.REQUEST_TIMEOUT}s.")
+            if self.on_status_update:
+                self.on_status_update(f"[DataFetcher] Error: Connection to Binance timed out ({settings.REQUEST_TIMEOUT}s). Check network/firewall.")
+        except aiohttp.ClientError as e: # Catch network-related errors from aiohttp
+            self.client = None
+            self.bsm = None
+            logger.error(f"[DataFetcher] API client initialization failed due to a network error: {e}", exc_info=True)
+            if self.on_status_update:
+                self.on_status_update(f"[DataFetcher] Error: Network issue connecting to Binance: {e}")
+        except Exception as e:
+            self.client = None # Ensure client is None on any other failure
+            self.bsm = None
+            logger.error(f"[DataFetcher] API client initialization failed: {e}", exc_info=True)
+            if self.on_status_update:
+                self.on_status_update(f"[DataFetcher] Error: API client initialization failed: {e}")
 
     def _process_kline_message(self, msg):
         '''

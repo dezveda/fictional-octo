@@ -11,6 +11,9 @@ LOG_LEVEL = "INFO" # e.g., DEBUG, INFO, WARNING, ERROR
 # GUI_THEME = "Dark"
 # GUI_COLOR = "blue"
 
+# Network Request Settings
+REQUEST_TIMEOUT = 30  # Seconds for Binance API requests
+
 # --- Indicator & Strategy Parameters ---
 
 # Indicator Periods
@@ -68,12 +71,3 @@ MIN_TP_DISTANCE_PERCENTAGE = 0.005  # 0.5% minimum distance for TP from entry
 MIN_SL_DISTANCE_PERCENTAGE = 0.005  # 0.5% minimum distance for SL from entry
 MIN_TP_FALLBACK_PERCENTAGE = 0.01   # 1% TP if ATR is not available
 MIN_SL_FALLBACK_PERCENTAGE = 0.01   # 1% SL if ATR is not available
-
-# Volume Profile & S/R Assessment (These were already present, moved SR_PROXIMITY_FACTOR, VOL_* under Strategy Helper)
-# SR_PROXIMITY_FACTOR = 0.003
-# VOLUME_AVG_PERIOD = 20
-# VOLUME_HIGH_MULTIPLIER = 1.5
-# VOLUME_LOW_MULTIPLIER = 0.7
-
-# Other strategy fine-tuning parameters (examples, can be added as needed)
-# SL_PRICE_BUFFER_ATR_FACTOR = 0.1 # This was moved up
