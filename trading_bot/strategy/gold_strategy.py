@@ -16,31 +16,61 @@ logger = logging.getLogger(__name__)
 
 class GoldenStrategy:
     def __init__(self, on_status_update=None, on_indicators_update=None, on_signal_update=None):
-        """
-        Initializes the Golden Strategy module.
-        on_status_update: Callback function to send status messages to GUI or logger.
-        """
         self.on_status_update = on_status_update
-        self.on_indicators_update = on_indicators_update # For GUI indicator updates
-        self.on_signal_update = on_signal_update     # For GUI signal updates
+        self.on_indicators_update = on_indicators_update
+        self.on_signal_update = on_signal_update
 
-        self.price_history_max_len = 100
-        self.close_prices = deque(maxlen=self.price_history_max_len)
-        self.high_prices = deque(maxlen=self.price_history_max_len)
-        self.low_prices = deque(maxlen=self.price_history_max_len)
-        self.all_kline_data_deque = deque(maxlen=self.price_history_max_len) # Stores full kline dicts
+        # Max length for raw 1s klines (e.g., for current price display, or very short-term patterns if ever needed)
+        self.raw_kline_max_len = 200 # e.g., around 3 minutes of 1s data
+        self.raw_all_kline_data_deque = deque(maxlen=self.raw_kline_max_len)
+
+        # Determine strategy timeframe properties
+        self.strategy_timeframe_str = settings.STRATEGY_TIMEFRAME
+        # Ensure 'min' is used for 'T' if that's what pandas Timedelta expects for minute.
+        # Pandas Timedelta is quite flexible: '1T' or '1min' for minute, '1H' for hour.
+        self.timeframe_delta = pd.Timedelta(self.strategy_timeframe_str.replace('T', 'min'))
+
+        # Max length for aggregated klines (e.g., 100 bars of 1H data = 100 hours)
+        # This should be based on indicator needs on aggregated data.
+        # Max of MACD long period (26) + signal (9) = 35. Add buffer for other indicators like ATR (14), etc.
+        # A general rule might be longest_indicator_period + some_lookback_for_stability + buffer
+        # For example, if MACD (35 bars) and ATR (14 bars) are used, 35 + 14 + buffer (e.g., 10-20) = ~60-70
+        # Using ATR_PERIOD (14) + 50 = 64. This should be settings based or calculated.
+        # Let's make it more robust, e.g. max(MACD_LONG_PERIOD+MACD_SIGNAL_PERIOD, ATR_PERIOD) + buffer
+        buffer_for_indicators = 20 # Number of extra bars
+        min_bars_needed = max(
+            (settings.MACD_LONG_PERIOD + settings.MACD_SIGNAL_PERIOD),
+            settings.RSI_PERIOD,
+            settings.SUPERTREND_ATR_PERIOD, # Supertrend needs ATR
+            settings.KDJ_N_PERIOD, # KDJ main period
+            settings.ATR_PERIOD # General ATR
+            # SAR, Fractal, Momentum often need fewer bars than MACD or long ATRs
+        )
+        self.agg_kline_max_len = min_bars_needed + buffer_for_indicators
+
+
+        self.agg_open_prices = deque(maxlen=self.agg_kline_max_len)
+        self.agg_high_prices = deque(maxlen=self.agg_kline_max_len)
+        self.agg_low_prices = deque(maxlen=self.agg_kline_max_len)
+        self.agg_close_prices = deque(maxlen=self.agg_kline_max_len)
+        self.agg_volumes = deque(maxlen=self.agg_kline_max_len)
+        self.agg_timestamps = deque(maxlen=self.agg_kline_max_len) # Start timestamp of the aggregated bar
+        self.agg_kline_data_deque = deque(maxlen=self.agg_kline_max_len) # Store full aggregated klines
+
+        self.current_agg_kline_buffer = [] # Buffer for 1s klines for current aggregating bar
+        self.last_agg_bar_start_time = None
 
         if self.on_status_update:
-            self.on_status_update("[GoldenStrategy] Initialized.")
+            self.on_status_update(f"[GoldenStrategy] Initialized for timeframe: {self.strategy_timeframe_str}. Agg history len: {self.agg_kline_max_len} (needs {min_bars_needed} for indicators).")
 
-    def _update_history(self, kline_data):
+    def _process_incoming_kline(self, kline_data):
         """
-        Updates historical data queues with the latest kline data.
+        Handles an incoming 1-second kline: stores it raw and adds to aggregation buffer.
+        Triggers aggregation if a new timeframe bar is completed.
         """
         try:
-            # Ensure kline_data keys exist and values are convertible
-            # Binance kline data comes as strings, convert to float/int as appropriate
-            k_time = int(kline_data['t']) # Timestamp
+            k_time_ms = int(kline_data['t'])
+            k_time_dt = pd.to_datetime(k_time_ms, unit='ms', utc=True)
             k_open = float(kline_data['o'])
             k_high = float(kline_data['h'])
             k_low = float(kline_data['l'])
@@ -48,89 +78,140 @@ class GoldenStrategy:
             k_volume = float(kline_data['v'])
 
             processed_kline = {
-                't': k_time, 'o': k_open, 'h': k_high,
+                't_ms': k_time_ms, # Keep original ms timestamp
+                't_dt': k_time_dt, # Store datetime object
+                'o': k_open, 'h': k_high,
                 'l': k_low, 'c': k_close, 'v': k_volume
             }
+            self.raw_all_kline_data_deque.append(processed_kline)
+        except (KeyError, ValueError) as e:
+            logger.error(f"[GoldenStrategy] Invalid kline data for raw storage: {e}. Data: {kline_data}")
+            return
 
-            self.close_prices.append(k_close)
-            self.high_prices.append(k_high)
-            self.low_prices.append(k_low)
-            self.all_kline_data_deque.append(processed_kline) # Store processed kline dict
+        self.current_agg_kline_buffer.append(processed_kline)
 
-        except KeyError as e:
-            logger.error(f"[GoldenStrategy] Kline data missing key: {e}. Data: {kline_data}")
-        except ValueError as e:
-            logger.error(f"[GoldenStrategy] Error converting kline data to numeric: {e}. Data: {kline_data}")
+        if not self.current_agg_kline_buffer:
+            return
 
+        current_kline_agg_period_start_time = processed_kline['t_dt'].floor(self.timeframe_delta)
 
-    def process_new_kline(self, kline_data):
-        """
-        Main processing function for each new kline.
-        """
-        self._update_history(kline_data)
-
-        min_data_points_for_strategy = 40 # Increased for more reliable initial indicator values
-        if len(self.close_prices) < min_data_points_for_strategy:
+        if self.last_agg_bar_start_time is None:
+            self.last_agg_bar_start_time = current_kline_agg_period_start_time
             if self.on_status_update:
-                self.on_status_update(f"[GoldenStrategy] Collecting more data... ({len(self.close_prices)}/{min_data_points_for_strategy})")
-            return None
+                 self.on_status_update(f"[GoldenStrategy] First kline received. Aggregation period started at {self.last_agg_bar_start_time.strftime('%Y-%m-%d %H:%M:%S')} for timeframe {self.strategy_timeframe_str}.")
 
-        # Convert deques to pandas Series for indicator calculations
-        close_series = pd.Series(list(self.close_prices))
-        high_series = pd.Series(list(self.high_prices))
-        low_series = pd.Series(list(self.low_prices))
+        if current_kline_agg_period_start_time > self.last_agg_bar_start_time:
+            klines_for_completed_bar = [
+                k for k in self.current_agg_kline_buffer
+                if k['t_dt'] >= self.last_agg_bar_start_time and k['t_dt'] < current_kline_agg_period_start_time
+            ]
 
-        # Prepare DataFrame for analyses that prefer it (like daily pivots)
-        # Ensure 't', 'h', 'l', 'c' are correct for these analysis functions
-        historical_df_for_analysis = pd.DataFrame(list(self.all_kline_data_deque))
+            if klines_for_completed_bar:
+                self._finalize_and_process_aggregated_bar(klines_for_completed_bar, self.last_agg_bar_start_time)
+
+                self.current_agg_kline_buffer = [
+                    k for k in self.current_agg_kline_buffer if k['t_dt'] >= current_kline_agg_period_start_time
+                ]
+            else:
+                if self.on_status_update: # Log if a bar was expected but no klines were in its period
+                    self.on_status_update(f"[GoldenStrategy] Potential data gap or timing issue: No klines found for completed bar period {self.last_agg_bar_start_time.strftime('%Y-%m-%d %H:%M:%S')}.")
+
+            self.last_agg_bar_start_time = current_kline_agg_period_start_time
+
+    def _finalize_and_process_aggregated_bar(self, bar_klines, bar_start_time_dt):
+        """Aggregates klines for a completed bar and triggers strategy logic."""
+        if not bar_klines:
+            return
+
+        agg_open = bar_klines[0]['o']
+        agg_high = max(k['h'] for k in bar_klines)
+        agg_low = min(k['l'] for k in bar_klines)
+        agg_close = bar_klines[-1]['c']
+        agg_volume = sum(k['v'] for k in bar_klines)
+
+        self.agg_open_prices.append(agg_open)
+        self.agg_high_prices.append(agg_high)
+        self.agg_low_prices.append(agg_low)
+        self.agg_close_prices.append(agg_close)
+        self.agg_volumes.append(agg_volume)
+        self.agg_timestamps.append(bar_start_time_dt)
+
+        aggregated_kline_data = {
+            't': int(bar_start_time_dt.timestamp() * 1000), # Millisecond timestamp for DataFrame consistency
+            'ts_datetime': bar_start_time_dt,
+            'o': agg_open, 'h': agg_high, 'l': agg_low, 'c': agg_close, 'v': agg_volume
+        }
+        self.agg_kline_data_deque.append(aggregated_kline_data)
+
+        if self.on_status_update:
+            self.on_status_update(f"[GoldenStrategy] New {self.strategy_timeframe_str} bar: O:{agg_open:.2f} H:{agg_high:.2f} L:{agg_low:.2f} C:{agg_close:.2f} V:{agg_volume:.2f} @ {bar_start_time_dt.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+
+        self._run_strategy_on_aggregated_data()
 
 
-        # 1. Calculate all required indicators
+    def _run_strategy_on_aggregated_data(self):
+        """
+        Calculates indicators and generates signals based on the aggregated data.
+        """
+        min_agg_bars_for_strategy = max(
+            (settings.MACD_LONG_PERIOD + settings.MACD_SIGNAL_PERIOD),
+            settings.RSI_PERIOD,
+            settings.SUPERTREND_ATR_PERIOD,
+            settings.KDJ_N_PERIOD,
+            settings.ATR_PERIOD
+        ) + 5 # Use a small buffer over the absolute minimum needed by any indicator
+
+        if len(self.agg_close_prices) < min_agg_bars_for_strategy:
+            if self.on_status_update:
+                self.on_status_update(f"[GoldenStrategy] Collecting more AGGREGATED bars... ({len(self.agg_close_prices)}/{min_agg_bars_for_strategy}) for {self.strategy_timeframe_str} timeframe")
+            return
+
+        close_series = pd.Series(list(self.agg_close_prices))
+        high_series = pd.Series(list(self.agg_high_prices))
+        low_series = pd.Series(list(self.agg_low_prices))
+
+        historical_agg_df_for_analysis = pd.DataFrame(list(self.agg_kline_data_deque))
+
         macd_data = calculator.calculate_macd(close_series, short_period=settings.MACD_SHORT_PERIOD, long_period=settings.MACD_LONG_PERIOD, signal_period=settings.MACD_SIGNAL_PERIOD)
         rsi_data = calculator.calculate_rsi(close_series, period=settings.RSI_PERIOD)
-        supertrend_data = calculator.calculate_supertrend(high_series, low_series, close_series, atr_period=settings.SUPERTREND_ATR_PERIOD, atr_multiplier=settings.SUPERTREND_MULTIPLIER)
+        supertrend_data = calculator.calculate_supertrend(high_series, low_series, close_series, atr_period=settings.ATR_PERIOD, atr_multiplier=settings.SUPERTREND_MULTIPLIER)
         kdj_data = calculator.calculate_kdj(high_series, low_series, close_series, n_period=settings.KDJ_N_PERIOD, m1_period=settings.KDJ_M1_PERIOD, m2_period=settings.KDJ_M2_PERIOD)
         sar_data = calculator.calculate_sar(high_series, low_series, initial_af=settings.SAR_INITIAL_AF, max_af=settings.SAR_MAX_AF, af_increment=settings.SAR_AF_INCREMENT)
         fractal_data = calculator.calculate_williams_fractal(high_series, low_series, window=settings.FRACTAL_WINDOW)
         momentum_data = calculator.calculate_momentum(close_series, period=settings.MOMENTUM_PERIOD)
         atr_series = calculator.calculate_atr(high_series, low_series, close_series, period=settings.ATR_PERIOD)
-        latest_atr = atr_series.iloc[-1] if atr_series is not None and not atr_series.empty and not pd.isna(atr_series.iloc[-1]) else None
+        latest_atr_val = atr_series.iloc[-1] if atr_series is not None and not atr_series.empty and not pd.isna(atr_series.iloc[-1]) else None
 
-        # Log basic indicator values if needed (be careful with verbosity)
-        # if self.on_status_update:
-        #     self.on_status_update(f"[GoldenStrategy] Indicators: RSI={rsi_data}, ST_Dir={'Up' if supertrend_data and supertrend_data['last_direction']==1 else ('Down' if supertrend_data else 'N/A')}")
-        # Update GUI with key indicators
         if self.on_indicators_update:
             indicator_gui_data = {
+                'timeframe': self.strategy_timeframe_str,
                 'RSI': rsi_data if rsi_data is not None else 'N/A',
-                'ST_DIR': 'N/A',
-                'ST_VAL': 'N/A',
+                'ST_DIR': 'N/A', 'ST_VAL': 'N/A',
                 'MACD_H': (macd_data['histogram'] if macd_data and macd_data.get('histogram') is not None else 'N/A'),
                 'KDJ_J': (kdj_data['J'] if kdj_data and kdj_data.get('J') is not None else 'N/A'),
                 'SAR_VAL': (sar_data['last_sar'] if sar_data and sar_data.get('last_sar') is not None else 'N/A'),
-                'SAR_DIR': ('Long' if sar_data and sar_data.get('last_direction') == 1 else ('Short' if sar_data and sar_data.get('last_direction') == -1 else 'N/A'))
-                # 'Momentum': momentum_data if momentum_data is not None else 'N/A',
-                # 'Fractal_Bear': fractals.get('last_bearish_price') if fractals else 'N/A',
-                # 'Fractal_Bull': fractals.get('last_bullish_price') if fractals else 'N/A',
+                'SAR_DIR': ('Long' if sar_data and sar_data.get('last_direction') == 1 else ('Short' if sar_data and sar_data.get('last_direction') == -1 else 'N/A')),
+                'ATR': latest_atr_val if latest_atr_val is not None else 'N/A'
             }
             if supertrend_data and supertrend_data.get('last_direction') is not None:
                 indicator_gui_data['ST_DIR'] = 'Up' if supertrend_data['last_direction'] == 1 else 'Down'
                 indicator_gui_data['ST_VAL'] = supertrend_data.get('last_trend', 'N/A')
             self.on_indicators_update(indicator_gui_data)
 
-        # 2. Perform specialized analysis
-        # Pass the deque of kline dicts or the DataFrame as needed by analysis functions
-        fib_analysis_result = fibonacci_analysis.analyze(self.all_kline_data_deque, self.on_status_update)
-        pivot_points_result = pivot_points.analyze_pivot_points(historical_df_for_analysis, self.on_status_update)
-        liquidity_info = liquidity_analysis.analyze(self.all_kline_data_deque, self.on_status_update)
+        fib_analysis_result = fibonacci_analysis.analyze(self.agg_kline_data_deque, self.on_status_update)
+        pivot_points_result = pivot_points.analyze_pivot_points(historical_agg_df_for_analysis, self.on_status_update)
+        if not pivot_points_result or not pivot_points_result.get('daily_pivots'):
+            if self.on_status_update:
+                status_msg = pivot_points_result.get('status', 'Pivot calculation failed or returned no data.') if pivot_points_result else 'Pivot analysis returned None.'
+                self.on_status_update(f"[GoldenStrategy] ({self.strategy_timeframe_str}) Daily pivots not available for this bar. Reason: {status_msg}")
+        liquidity_info = liquidity_analysis.analyze(self.agg_kline_data_deque, self.on_status_update)
 
-        # 3. Combine indicators and analysis for signal generation
         signal = self._generate_signal(
-            current_kline=self.all_kline_data_deque[-1], # Pass the latest kline for entry price context
+            current_kline=self.agg_kline_data_deque[-1],
             indicators={
                 'macd': macd_data, 'rsi': rsi_data, 'supertrend': supertrend_data,
-                'kdj': kdj_data, 'sar': sar_data, 'fractal': fractal_data, 'momentum': momentum_data,
-                'atr': latest_atr
+                'kdj': kdj_data, 'sar': sar_data, 'fractal': fractal_data,
+                'momentum': momentum_data, 'atr': latest_atr_val
             },
             analysis={
                 'fibonacci': fib_analysis_result,
@@ -143,16 +224,14 @@ class GoldenStrategy:
             if self.on_signal_update:
                 tp_info = f", TP: {signal.get('tp'):.2f}" if signal.get('tp') is not None else ""
                 sl_info = f", SL: {signal.get('sl'):.2f}" if signal.get('sl') is not None else ""
-                self.on_signal_update(f"{signal['type']} @ {signal['price']:.2f}{tp_info}{sl_info}")
-            # The existing on_status_update for signal can remain or be removed if redundant
-            if self.on_status_update: # Optional: keep general status log for signal
-                tp_info = f", TP: {signal.get('tp'):.2f}" if signal.get('tp') is not None else ""
-                sl_info = f", SL: {signal.get('sl'):.2f}" if signal.get('sl') is not None else ""
-                self.on_status_update(f"[GoldenStrategy] Signal: {signal['type']} at {signal['price']:.2f}{tp_info}{sl_info}")
-            logger.info(f"Generated Signal: {signal}")
-            return signal
+                self.on_signal_update(f"({self.strategy_timeframe_str}) {signal['type']} @ {signal['price']:.2f}{tp_info}{sl_info}")
+            logger.info(f"({self.strategy_timeframe_str}) Generated Signal: {signal}")
+        else:
+            if self.on_status_update:
+                 self.on_status_update(f"[GoldenStrategy] ({self.strategy_timeframe_str}) No signal generated on this bar.")
 
-        return None
+    def process_new_kline(self, kline_data):
+        self._process_incoming_kline(kline_data)
 
     def _generate_signal(self, current_kline, indicators, analysis):
         """
@@ -297,64 +376,83 @@ class GoldenStrategy:
 if __name__ == '__main__':
     print("--- Testing GoldenStrategy Integration ---")
 
+    # def mock_status_update(message):
+    #     # Limit printing for cleaner test output during normal runs
+    #     if "Collecting more data" not in message or "Generating signal" not in message:
+    #          print(f"STATUS_UPDATE: {message}")
+    # For this test, let's see more status updates for aggregation
     def mock_status_update(message):
-        # Limit printing for cleaner test output during normal runs
-        if "Collecting more data" not in message or "Generating signal" not in message:
-             print(f"STATUS_UPDATE: {message}")
+        print(f"STATUS_UPDATE: {message}")
 
-    strategy = GoldenStrategy(on_status_update=mock_status_update)
 
-    # Simulate receiving kline data points
+    strategy = GoldenStrategy(on_status_update=mock_status_update,
+                              on_indicators_update=lambda ind_data: print(f"INDICATORS_UPDATE: {ind_data}"),
+                              on_signal_update=lambda sig_data: print(f"SIGNAL_UPDATE: {sig_data}"))
+
+    # Simulate receiving kline data points (1-second klines)
+    # Test with STRATEGY_TIMEFRAME = "1T" (1 minute) for faster testing of aggregation
+    original_timeframe = settings.STRATEGY_TIMEFRAME
+    settings.STRATEGY_TIMEFRAME = "1T" # Override for this test
+    print(f"TEST: Overriding STRATEGY_TIMEFRAME to {settings.STRATEGY_TIMEFRAME} for this test run.")
+    strategy = GoldenStrategy(on_status_update=mock_status_update,
+                              on_indicators_update=lambda ind_data: print(f"INDICATORS_UPDATE: {ind_data}"),
+                              on_signal_update=lambda sig_data: print(f"SIGNAL_UPDATE: {sig_data}"))
+
+
+    # Generate 3 minutes of 1-second data
+    # Max length for aggregated klines (e.g., 100 bars of 1H data = 100 hours)
+    # self.agg_kline_max_len = settings.ATR_PERIOD + 50
+    # min_agg_bars_for_strategy = settings.ATR_PERIOD + 20
+    # Need enough data for min_agg_bars_for_strategy (14+20=34 bars of 1T) -> 34 minutes
+    # So we need at least 34 * 60 = 2040 seconds of data. Let's do 2100 (35 mins).
+
+    num_seconds_to_simulate = (settings.ATR_PERIOD + 25) * 60 # (14+25)*60 = 39 * 60 = 2340 seconds
+
     base_price = 20000
     klines_to_test = []
-    # Generate enough data for indicators (e.g., 50 points)
-    # Start with a downtrend then an uptrend to see if signals might change
-    for i in range(50):
-        price_change = 0
-        if i < 25: # Downtrend phase
-            price_change = - (i % 5 + 1) * 5
-        else: # Uptrend phase
-            price_change = (i % 5 + 1) * 7
+    start_time_ms = int(pd.Timestamp('2023-01-01 00:00:00', tz='UTC').value / 10**6)
 
-        # Ensure base_price doesn't go too low
-        if base_price + price_change < 5000 : base_price = 5000
+    for i in range(num_seconds_to_simulate):
+        price_change = (i % 10 - 4.5) * 0.1 # Small price fluctuations per second
 
-        k_time = pd.Timestamp('2023-01-01 00:00:00', tz='UTC').value // 10**6 + i * 1000 * 60 # 1 minute klines
-        if i > 30 and i < 35: # Simulate a day change for pivot points
-             k_time = pd.Timestamp('2023-01-02 00:00:00', tz='UTC').value // 10**6 + (i-30) * 1000 * 60
+        current_time_ms = start_time_ms + i * 1000
 
+        # Simulate a daily pattern for pivot testing (highs/lows change over a day)
+        # This is very rough, pivots are calculated on previous day's data.
+        # The main goal here is to test aggregation.
+        day_cycle = (i // (60*60*4)) % 2 # Change general price trend every 4 hours for variety
+        if day_cycle == 0:
+            base_price_offset = (i % (60*10) - 300) * 0.1 # small up/down wave over 10 mins
+        else:
+            base_price_offset = -(i % (60*10) - 300) * 0.1
+
+
+        k_open = base_price + base_price_offset + price_change
+        k_high = k_open + abs(price_change) + 5
+        k_low = k_open - abs(price_change) - 5
+        k_close = k_open + price_change / 2
+        k_volume = 1 + (i % 10) # Simple volume pattern
 
         k = {
-            't': str(k_time), # Timestamps for pivot points
-            'o': str(base_price + price_change - 5),
-            'h': str(base_price + price_change + 50),
-            'l': str(base_price + price_change - 50),
-            'c': str(base_price + price_change),
-            'v': str(100 + i*2)
+            't': str(current_time_ms),
+            'o': f"{k_open:.2f}",
+            'h': f"{k_high:.2f}",
+            'l': f"{k_low:.2f}",
+            'c': f"{k_close:.2f}",
+            'v': f"{k_volume:.2f}"
         }
         klines_to_test.append(k)
-        base_price += price_change
-        if base_price < 1000: base_price = 1000 # Floor price
 
-    print(f"Generated {len(klines_to_test)} klines for testing.")
+    print(f"Generated {len(klines_to_test)} 1-second klines for testing ({num_seconds_to_simulate/60:.1f} minutes).")
 
     final_signal = None
     for idx, kline_data_point in enumerate(klines_to_test):
-        # print(f"Processing kline {idx+1}/{len(klines_to_test)}: C={kline_data_point['c']}")
-        signal = strategy.process_new_kline(kline_data_point)
-        if signal:
-            final_signal = signal # Store the last signal generated
-            print(f"** Signal at kline {idx+1}: {signal} ** (Price: {kline_data_point['c']})")
-            # break # Optional: stop on first signal for cleaner test output
+        strategy.process_new_kline(kline_data_point)
+        # Signals are now generated inside _run_strategy_on_aggregated_data
+        # which is called by _finalize_and_process_aggregated_bar
+        # We can't easily get the signal here directly unless we add a return to process_new_kline
+        # For testing, rely on the on_signal_update callback printing.
 
-    if final_signal:
-        print(f"\nLast Generated Test Signal: {final_signal}")
-    else:
-        print("\nNo signal generated with the first pass heuristic logic and test data.")
-        # This might be expected if scores don't meet threshold or data isn't conducive.
-        # Check last few indicator values if possible from logs if on_status_update was more verbose.
-        if len(strategy.all_kline_data_deque) >= strategy.price_history_max_len: # Check if maxlen was reached, not min_data_points
-             print("Debug info: Strategy history deque is full.")
-             # Could print last indicator values here if captured.
-
-    print("\nGoldenStrategy integration test finished.")
+    print("\nGoldenStrategy aggregation test finished.")
+    settings.STRATEGY_TIMEFRAME = original_timeframe # Reset for other potential uses/tests
+    print(f"TEST: Restored STRATEGY_TIMEFRAME to {settings.STRATEGY_TIMEFRAME}.")

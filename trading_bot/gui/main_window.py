@@ -2,6 +2,7 @@ import customtkinter as ctk
 import tkinter as tk
 from collections import deque
 import logging
+from trading_bot.utils import settings # For displaying ATR_PERIOD
 
 logger_gui = logging.getLogger(__name__ + '_gui')
 
@@ -114,13 +115,19 @@ class App(ctk.CTk):
         try:
             if isinstance(indicators_data, dict):
                 display_text = []
-                if 'RSI' in indicators_data: display_text.append(f"RSI: {indicators_data['RSI']:.2f}" if isinstance(indicators_data['RSI'], float) else f"RSI: {indicators_data['RSI']}")
-                if 'ST_DIR' in indicators_data: display_text.append(f"Supertrend: {indicators_data['ST_DIR']}")
+                timeframe = indicators_data.get('timeframe', '')
+                if timeframe:
+                    display_text.append(f"--- Indicators ({timeframe}) ---")
+
+                if 'RSI' in indicators_data: display_text.append(f"RSI ({settings.RSI_PERIOD}): {indicators_data['RSI']:.2f}" if isinstance(indicators_data['RSI'], float) else f"RSI ({settings.RSI_PERIOD}): {indicators_data['RSI']}")
+                if 'ST_DIR' in indicators_data: display_text.append(f"Supertrend ({settings.ATR_PERIOD},{settings.SUPERTREND_MULTIPLIER}): {indicators_data['ST_DIR']}")
                 if 'ST_VAL' in indicators_data: display_text.append(f"  └ Value: {indicators_data['ST_VAL']:.2f}" if isinstance(indicators_data['ST_VAL'], float) else f"  └ Value: {indicators_data['ST_VAL']}")
-                if 'MACD_H' in indicators_data: display_text.append(f"MACD Hist: {indicators_data['MACD_H']:.4f}" if isinstance(indicators_data['MACD_H'], float) else f"MACD Hist: {indicators_data['MACD_H']}")
-                if 'KDJ_J' in indicators_data: display_text.append(f"KDJ (J): {indicators_data['KDJ_J']:.2f}" if isinstance(indicators_data['KDJ_J'], float) else f"KDJ (J): {indicators_data['KDJ_J']}")
-                if 'SAR_VAL' in indicators_data: display_text.append(f"SAR: {indicators_data['SAR_VAL']:.2f}" if isinstance(indicators_data['SAR_VAL'], float) else f"SAR: {indicators_data['SAR_VAL']}")
+                if 'MACD_H' in indicators_data: display_text.append(f"MACD Hist ({settings.MACD_SHORT_PERIOD},{settings.MACD_LONG_PERIOD},{settings.MACD_SIGNAL_PERIOD}): {indicators_data['MACD_H']:.4f}" if isinstance(indicators_data['MACD_H'], float) else f"MACD Hist: {indicators_data['MACD_H']}")
+                if 'KDJ_J' in indicators_data: display_text.append(f"KDJ ({settings.KDJ_N_PERIOD},{settings.KDJ_M1_PERIOD},{settings.KDJ_M2_PERIOD}) (J): {indicators_data['KDJ_J']:.2f}" if isinstance(indicators_data['KDJ_J'], float) else f"KDJ (J): {indicators_data['KDJ_J']}")
+                if 'SAR_VAL' in indicators_data: display_text.append(f"SAR ({settings.SAR_INITIAL_AF},{settings.SAR_AF_INCREMENT},{settings.SAR_MAX_AF}): {indicators_data['SAR_VAL']:.2f}" if isinstance(indicators_data['SAR_VAL'], float) else f"SAR: {indicators_data['SAR_VAL']}")
                 if 'SAR_DIR' in indicators_data: display_text.append(f"  └ Dir: {indicators_data['SAR_DIR']}")
+                if 'ATR' in indicators_data: display_text.append(f"ATR ({settings.ATR_PERIOD}): {indicators_data['ATR']:.4f}" if isinstance(indicators_data['ATR'], float) else f"ATR: {indicators_data['ATR']}")
+
                 self.indicators_details_label.configure(text="\n".join(display_text))
             else:
                 self.indicators_details_label.configure(text=str(indicators_data))
