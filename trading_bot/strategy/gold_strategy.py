@@ -28,7 +28,13 @@ class GoldenStrategy:
         self.strategy_timeframe_str = settings.STRATEGY_TIMEFRAME
         # Ensure 'min' is used for 'T' if that's what pandas Timedelta expects for minute.
         # Pandas Timedelta is quite flexible: '1T' or '1min' for minute, '1H' for hour.
-        self.timeframe_delta = pd.Timedelta(self.strategy_timeframe_str.replace('T', 'min'))
+        # self.timeframe_delta = pd.Timedelta(self.strategy_timeframe_str.replace('T', 'min'))
+        # More robust timedelta string creation:
+        td_str = self.strategy_timeframe_str.lower()
+        if 't' in td_str and not 'min' in td_str: # For minute timeframes like '15T' -> '15min'
+            td_str = td_str.replace('t', 'min')
+        # 'h' for hours is already handled by .lower() if input was 'H'
+        self.timeframe_delta = pd.Timedelta(td_str)
 
         # Max length for aggregated klines (e.g., 100 bars of 1H data = 100 hours)
         # This should be based on indicator needs on aggregated data.

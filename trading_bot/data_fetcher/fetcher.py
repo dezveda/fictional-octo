@@ -12,7 +12,7 @@ class DataFetcher:
     def _map_interval_str_to_api_const(self, interval_str):
         # Mapping from settings string to python-binance AsyncClient constants
         mapping = {
-            "1s": AsyncClient.KLINE_INTERVAL_1SECOND, # Added 1s for completeness, though WS might use it directly
+            # "1s": AsyncClient.KLINE_INTERVAL_1SECOND, # Typically not available for historical bulk fetch / may cause issues. WebSocket uses direct string for 1s.
             "1m": AsyncClient.KLINE_INTERVAL_1MINUTE,
             "3m": AsyncClient.KLINE_INTERVAL_3MINUTE,
             "5m": AsyncClient.KLINE_INTERVAL_5MINUTE,
