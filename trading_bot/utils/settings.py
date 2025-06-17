@@ -37,6 +37,10 @@ STRATEGY_ENTRY_THRESHOLD = 3.0 # Score needed to generate a signal
 ATR_TP_MULTIPLIER = 2.0 # Example: TP is 2 * ATR
 ATR_SL_MULTIPLIER = 1.5 # Example: SL is 1.5 * ATR
 
+# Timeframe for strategy calculations (e.g., '1T' for 1 minute, '5T', '15T', '1H', '4H')
+# Note: 'T' is pandas offset alias for minute.
+STRATEGY_TIMEFRAME = "1H"
+
 # Minimum profit/loss percentages
 MIN_TP_DISTANCE_PERCENTAGE = 0.005  # 0.5% minimum distance for TP from entry
 MIN_SL_DISTANCE_PERCENTAGE = 0.005  # 0.5% minimum distance for SL from entry

@@ -70,8 +70,23 @@ def get_daily_pivots(historical_kline_df, on_status_update=None):
 
     if prev_day_data.empty:
         if on_status_update:
-            on_status_update(f"[PivotPointAnalysis] No data for previous day ({previous_day_utc_start.date()}) to calculate daily pivots.")
-        return None
+            data_min_date_str = 'N/A'
+            data_max_date_str = 'N/A'
+            # Check if 'datetime' column exists and is not empty before trying to access min/max
+            if 'datetime' in historical_kline_df.columns and not historical_kline_df['datetime'].dropna().empty:
+                try:
+                    data_min_date_str = historical_kline_df['datetime'].min().strftime('%Y-%m-%d %H:%M:%S UTC')
+                    data_max_date_str = historical_kline_df['datetime'].max().strftime('%Y-%m-%d %H:%M:%S UTC')
+                except Exception as e_dt_format: # Catch errors during strftime if dates are weird
+                    logger.warning(f"[PivotPointAnalysis] Could not format min/max dates: {e_dt_format}")
+                    data_min_date_str = str(historical_kline_df['datetime'].min()) # Fallback to default string
+                    data_max_date_str = str(historical_kline_df['datetime'].max())
+
+            target_prev_day_str = previous_day_utc_start.strftime('%Y-%m-%d') if 'previous_day_utc_start' in locals() else 'Unknown Target Prev Day'
+            msg = (f"[PivotPointAnalysis] No data for previous day ({target_prev_day_str}) "
+                   f"to calculate daily pivots. Historical data available from {data_min_date_str} to {data_max_date_str}.")
+            on_status_update(msg)
+        return None # Return None as no prev day data
 
     prev_day_high = prev_day_data['h'].max()
     prev_day_low = prev_day_data['l'].min()
