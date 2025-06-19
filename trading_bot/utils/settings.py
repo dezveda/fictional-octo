@@ -11,6 +11,9 @@ LOG_LEVEL = "INFO" # e.g., DEBUG, INFO, WARNING, ERROR
 # GUI_THEME = "Dark"
 # GUI_COLOR = "blue"
 
+# Chart settings
+CHART_MAX_AGG_BARS_DISPLAY = 100 # Max number of aggregated bars to display on chart
+
 # Network Request Settings
 REQUEST_TIMEOUT = 30  # Seconds for Binance API requests
 
