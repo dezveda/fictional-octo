@@ -78,6 +78,9 @@ class GoldenStrategy:
 
         self.current_agg_kline_buffer.append(processed_kline)
 
+        if not self.is_historical_fill_active:
+            self._trigger_provisional_chart_update()
+
         if not self.current_agg_kline_buffer:
             return
 
@@ -87,6 +90,8 @@ class GoldenStrategy:
             self.last_agg_bar_start_time = current_kline_agg_period_start_time
             if self.on_status_update:
                  self.on_status_update(f"[GoldenStrategy] First kline received. Aggregation period started at {self.last_agg_bar_start_time.strftime('%Y-%m-%d %H:%M:%S')} for timeframe {self.strategy_timeframe_str}.")
+            if not self.is_historical_fill_active:
+                self._trigger_provisional_chart_update()
 
         if current_kline_agg_period_start_time > self.last_agg_bar_start_time:
             klines_for_completed_bar = [
@@ -105,6 +110,8 @@ class GoldenStrategy:
                     self.on_status_update(f"[GoldenStrategy] Potential data gap or timing issue: No klines found for completed bar period {self.last_agg_bar_start_time.strftime('%Y-%m-%d %H:%M:%S')}.")
 
             self.last_agg_bar_start_time = current_kline_agg_period_start_time
+            if not self.is_historical_fill_active:
+                 self._trigger_provisional_chart_update()
 
     def _finalize_and_process_aggregated_bar(self, bar_klines, bar_start_time_dt):
         if not bar_klines:
@@ -156,40 +163,20 @@ class GoldenStrategy:
                     })
                 if self.on_signal_update:
                     self.on_signal_update(f"Waiting for data on {self.strategy_timeframe_str}...")
+                if self.on_chart_update: self._trigger_provisional_chart_update()
             return
+
+        # --- Chart update for completed bars (now handled by provisional or final update from main) ---
+        # The old block for chart update based *only* on agg_kline_data_deque is removed.
+        # Provisional updates handle live, and main.py's call after historical fill handles the one-off update.
+        # If a chart update is desired *after* indicators for a completed bar are calculated (live),
+        # _trigger_provisional_chart_update can be called here again.
+        # For now, the most frequent update is from _process_incoming_kline.
 
         close_series = pd.Series(list(self.agg_close_prices))
         high_series = pd.Series(list(self.agg_high_prices))
         low_series = pd.Series(list(self.agg_low_prices))
-
         historical_agg_df_for_analysis = pd.DataFrame(list(self.agg_kline_data_deque))
-
-        if self.on_chart_update and not self.agg_kline_data_deque.maxlen == 0 and len(self.agg_kline_data_deque) > 1 :
-            chart_df_data = []
-            for kline in self.agg_kline_data_deque:
-                chart_df_data.append({
-                    'Timestamp': kline.get('ts_datetime'),
-                    'Open': kline.get('o'),
-                    'High': kline.get('h'),
-                    'Low': kline.get('l'),
-                    'Close': kline.get('c'),
-                    'Volume': kline.get('v')
-                })
-            if chart_df_data:
-                try:
-                    chart_df = pd.DataFrame(chart_df_data)
-                    chart_df.set_index('Timestamp', inplace=True)
-                    for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
-                        chart_df[col] = pd.to_numeric(chart_df[col], errors='coerce')
-                    chart_df.dropna(subset=['Open', 'High', 'Low', 'Close'], inplace=True)
-
-                    if not chart_df.empty and not self.is_historical_fill_active :
-                        self.on_chart_update(chart_df)
-                    elif chart_df.empty and self.on_status_update and not self.is_historical_fill_active:
-                        self.on_status_update('[GoldenStrategy] Chart DataFrame became empty after processing for live update.')
-                except Exception as e_chart_df:
-                    logger.error(f'[GoldenStrategy] Error preparing DataFrame for chart: {e_chart_df}', exc_info=True)
-                    if self.on_status_update and not self.is_historical_fill_active: self.on_status_update(f'[GoldenStrategy] Error preparing chart data: {e_chart_df}')
 
         macd_data = calculator.calculate_macd(close_series, short_period=settings.MACD_SHORT_PERIOD, long_period=settings.MACD_LONG_PERIOD, signal_period=settings.MACD_SIGNAL_PERIOD)
         rsi_data = calculator.calculate_rsi(close_series, period=settings.RSI_PERIOD)
@@ -239,23 +226,104 @@ class GoldenStrategy:
             }
         )
 
-        if signal:
-            if self.on_signal_update and not self.is_historical_fill_active:
-                tp_info = f", TP: {signal.get('tp'):.2f}" if signal.get('tp') is not None else ""
-                sl_info = f", SL: {signal.get('sl'):.2f}" if signal.get('sl') is not None else ""
-                self.on_signal_update(f"({self.strategy_timeframe_str}) {signal['type']} @ {signal['price']:.2f}{tp_info}{sl_info}")
-            logger.info(f"({self.strategy_timeframe_str}) Generated Signal: {signal} (HistoricalFillActive: {self.is_historical_fill_active})")
-        else:
+        # --- Process Signal Output ---
+        if not self.is_historical_fill_active: # Only send updates for live data or final historical update
+            if signal and self.on_signal_update:
+                signal_type = signal.get('type')
+                if signal_type in ["LONG", "SHORT"]:
+                    tp_val = signal.get('tp')
+                    sl_val = signal.get('sl')
+                    price_val = signal.get('price')
+                    tp_info = f", TP: {tp_val:.2f}" if tp_val is not None else ""
+                    sl_info = f", SL: {sl_val:.2f}" if sl_val is not None else ""
+                    price_info = f" @ {price_val:.2f}" if price_val is not None else ""
+                    self.on_signal_update(f"({self.strategy_timeframe_str}) {signal_type}{price_info}{tp_info}{sl_info}")
+                    logger.info(f"({self.strategy_timeframe_str}) Generated Trade Signal: {signal}")
+                elif signal_type == 'CONSOLIDATION_INFO':
+                    long_p = signal.get('long_perc', 0.0)
+                    short_p = signal.get('short_perc', 0.0)
+                    debug_states_for_log = signal.get('debug_states', {})
+                    self.on_signal_update(f"({self.strategy_timeframe_str}) Consolidation: LONG {long_p:.0f}% | SHORT {short_p:.0f}%")
+                    logger.debug(f"[GoldenStrategy] ({self.strategy_timeframe_str}) Consolidation Info: Long {long_p:.0f}%, Short {short_p:.0f}%. States: {debug_states_for_log}")
+                else: # Signal is None or unrecognized type
+                    self.on_signal_update(f"({self.strategy_timeframe_str}) No specific signal / Awaiting conditions")
+            elif self.on_signal_update and not self.is_historical_fill_active: # signal is None
+                self.on_signal_update(f"({self.strategy_timeframe_str}) No signal data returned by strategy")
+
+        # Status update if no actual trade signal was generated
+        if not (signal and signal.get('type') in ["LONG", "SHORT"]):
             if self.on_status_update and not self.is_historical_fill_active:
-                 self.on_status_update(f"[GoldenStrategy] ({self.strategy_timeframe_str}) No signal generated on this bar.")
+                self.on_status_update(f"[GoldenStrategy] ({self.strategy_timeframe_str}) No *trade* signal generated on this bar.")
+
 
     def process_new_kline(self, kline_data):
         self._process_incoming_kline(kline_data)
 
+    # --- Method for Live Chart Update ---
+    def _trigger_provisional_chart_update(self):
+        """
+        Prepares and sends data for chart update, including the current forming (provisional) bar.
+        This is called frequently (e.g., with each new base kline).
+        """
+        if not self.on_chart_update: # Only proceed if callback is set
+            return
+
+        chart_klines_dicts = list(self.agg_kline_data_deque)
+
+        if self.current_agg_kline_buffer and self.last_agg_bar_start_time is not None:
+            try:
+                prov_bar = {
+                    'ts_datetime': self.last_agg_bar_start_time,
+                    'o': self.current_agg_kline_buffer[0]['o'],
+                    'h': max(k['h'] for k in self.current_agg_kline_buffer),
+                    'l': min(k['l'] for k in self.current_agg_kline_buffer),
+                    'c': self.current_agg_kline_buffer[-1]['c'],
+                    'v': sum(k['v'] for k in self.current_agg_kline_buffer)
+                }
+                chart_klines_dicts.append(prov_bar)
+            except (IndexError, KeyError, TypeError) as e:
+                logger.warning(f"[GoldenStrategy] Could not form provisional bar for chart: {e}. Buffer size: {len(self.current_agg_kline_buffer)}")
+
+        if not chart_klines_dicts:
+            self.on_chart_update(pd.DataFrame())
+            return
+
+        chart_df_data = []
+        for kline_dict in chart_klines_dicts:
+            chart_df_data.append({
+                'Timestamp': kline_dict.get('ts_datetime'),
+                'Open': kline_dict.get('o'),
+                'High': kline_dict.get('h'),
+                'Low': kline_dict.get('l'),
+                'Close': kline_dict.get('c'),
+                'Volume': kline_dict.get('v')
+            })
+
+        try:
+            chart_df = pd.DataFrame(chart_df_data)
+            if chart_df.empty or 'Timestamp' not in chart_df.columns or chart_df['Timestamp'].isnull().all():
+                self.on_chart_update(pd.DataFrame())
+                return
+            chart_df.set_index('Timestamp', inplace=True)
+            for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                chart_df[col] = pd.to_numeric(chart_df[col], errors='coerce')
+            chart_df.dropna(subset=['Open', 'High', 'Low', 'Close'], inplace=True)
+
+            if not chart_df.empty:
+                max_chart_bars = getattr(settings, 'CHART_MAX_AGG_BARS_DISPLAY', 100)
+                chart_df_to_send = chart_df.iloc[-max_chart_bars:] if len(chart_df) > max_chart_bars else chart_df
+                self.on_chart_update(chart_df_to_send)
+            else:
+                self.on_chart_update(pd.DataFrame())
+
+        except Exception as e_chart_df_prov:
+            logger.error(f'[GoldenStrategy] Error preparing DataFrame for provisional chart: {e_chart_df_prov}', exc_info=False)
+            if self.on_status_update: self.on_status_update(f'[GoldenStrategy] Error preparing chart data (live): {e_chart_df_prov}')
+    # --- End Method for Live Chart Update ---
+
     # --- Signal Generation Helper Methods ---
 
     def _get_indicator_state(self, value, neutral_low, neutral_high, strong_threshold=None, weak_threshold=None):
-        # This is a placeholder concept, each indicator will have more specific logic
         if value is None: return 'NEUTRAL'
         if strong_threshold:
             if value >= strong_threshold: return 'VERY_STRONG_BULLISH'
@@ -291,7 +359,7 @@ class GoldenStrategy:
         if not macd_data or macd_data.get('macd') is None or macd_data.get('signal') is None or macd_data.get('histogram') is None:
             return 'NEUTRAL'
         macd_line, signal_line, histogram = macd_data['macd'], macd_data['signal'], macd_data['histogram']
-        hist_strength_threshold = getattr(settings, 'MACD_HIST_STRENGTH_THRESHOLD', 0.0001) # Example
+        hist_strength_threshold = getattr(settings, 'MACD_HIST_STRENGTH_THRESHOLD', 0.0001)
 
         if macd_line > signal_line and histogram > 0:
             return 'STRONG_BULLISH' if histogram > hist_strength_threshold else 'BULLISH'
@@ -321,7 +389,6 @@ class GoldenStrategy:
         j_oversold = getattr(settings, 'KDJ_J_OVERSOLD', 10)
         k_confirm_ob = getattr(settings, 'KDJ_K_CONFIRM_OVERBOUGHT', 80)
         k_confirm_os = getattr(settings, 'KDJ_K_CONFIRM_OVERSOLD', 20)
-
 
         if j > j_overbought or (j > k_confirm_ob and k > k_confirm_ob): return 'OVERBOUGHT'
         if j < j_oversold or (j < k_confirm_os and k < k_confirm_os): return 'OVERSOLD'
@@ -381,6 +448,59 @@ class GoldenStrategy:
         if current_vol > avg_vol * vol_high_multiplier: return 'HIGH_VOLUME'
         if current_vol < avg_vol * vol_low_multiplier: return 'LOW_VOLUME'
         return 'AVERAGE_VOLUME'
+
+    def _calculate_signal_consolidation(self, assessed_states_dict, target_signal_type):
+        """Calculates a consolidation percentage towards a target signal type."""
+        current_score = 0
+        max_score = 0
+
+        trend_state = assessed_states_dict.get('trend', 'NEUTRAL_TREND')
+        macd_state = assessed_states_dict.get('macd', 'NEUTRAL')
+        rsi_state = assessed_states_dict.get('rsi', 'NEUTRAL')
+        kdj_state = assessed_states_dict.get('kdj', 'NEUTRAL')
+        fractal_assessment = assessed_states_dict.get('fractal', 'NEUTRAL')
+        sr_level_assessment = assessed_states_dict.get('sr', 'NEUTRAL_SR')
+        volume_assessment = assessed_states_dict.get('volume', 'NEUTRAL_VOLUME')
+
+        if target_signal_type == "LONG":
+            max_score += 2 # Trend
+            if trend_state == 'STRONG_BULLISH_TREND': current_score += 2
+            elif trend_state == 'BULLISH_TREND_ST' or trend_state == 'BULLISH_TREND_SAR': current_score += 1
+            max_score += 2 # MACD
+            if macd_state == 'STRONG_BULLISH': current_score += 2
+            elif macd_state == 'BULLISH': current_score += 1
+            max_score += 1 # RSI
+            if rsi_state == 'BULLISH': current_score += 1
+            max_score += 1 # KDJ
+            if kdj_state == 'BULLISH' or kdj_state == 'OVERSOLD': current_score += 1
+            max_score += 2 # S/R
+            if sr_level_assessment in ['BOUNCE_SUPPORT_PIVOT', 'BOUNCE_SUPPORT_FIB', 'BOUNCE_SUPPORT_LIQ', 'BREAKOUT_ABOVE_R1_PIVOT']: current_score += 2
+            max_score += 1 # Fractal
+            if fractal_assessment == 'BROKE_BEARISH_FRACTAL_UP': current_score += 1
+            max_score += 2 # Volume
+            if volume_assessment == 'HIGH_VOLUME': current_score += 2
+            elif volume_assessment == 'AVERAGE_VOLUME': current_score += 1
+        elif target_signal_type == "SHORT":
+            max_score += 2 # Trend
+            if trend_state == 'STRONG_BEARISH_TREND': current_score += 2
+            elif trend_state == 'BEARISH_TREND_ST' or trend_state == 'BEARISH_TREND_SAR': current_score += 1
+            max_score += 2 # MACD
+            if macd_state == 'STRONG_BEARISH': current_score += 2
+            elif macd_state == 'BEARISH': current_score += 1
+            max_score += 1 # RSI
+            if rsi_state == 'BEARISH': current_score += 1
+            max_score += 1 # KDJ
+            if kdj_state == 'BEARISH' or kdj_state == 'OVERBOUGHT': current_score += 1
+            max_score += 2 # S/R
+            if sr_level_assessment in ['REJECT_RESISTANCE_PIVOT', 'REJECT_RESISTANCE_FIB', 'REJECT_RESISTANCE_LIQ', 'BREAKDOWN_BELOW_S1_PIVOT']: current_score += 2
+            max_score += 1 # Fractal
+            if fractal_assessment == 'BROKE_BULLISH_FRACTAL_DOWN': current_score += 1
+            max_score += 2 # Volume
+            if volume_assessment == 'HIGH_VOLUME': current_score += 2
+            elif volume_assessment == 'AVERAGE_VOLUME': current_score += 1
+
+        if max_score == 0: return 0.0
+        return (current_score / max_score) * 100
 
     # --- End Signal Generation Helper Methods ---
 
@@ -541,7 +661,14 @@ class GoldenStrategy:
                 debug_states = { "trend": trend_state, "macd": macd_state, "rsi": rsi_state, "kdj": kdj_state, "fractal": fractal_assessment, "sr": sr_level_assessment, "volume": volume_assessment }
                 return {'type': signal_type, 'price': entry_price, 'tp': take_profit, 'sl': stop_loss, 'debug_states': debug_states}
 
-        return None
+        # Calculate consolidation percentages if no trade signal
+        assessed_states_dict = {
+            'trend': trend_state, 'macd': macd_state, 'rsi': rsi_state, 'kdj': kdj_state,
+            'fractal': fractal_assessment, 'sr': sr_level_assessment, 'volume': volume_assessment
+        }
+        long_consol_perc = self._calculate_signal_consolidation(assessed_states_dict, "LONG")
+        short_consol_perc = self._calculate_signal_consolidation(assessed_states_dict, "SHORT")
+        return {'type': 'CONSOLIDATION_INFO', 'long_perc': long_consol_perc, 'short_perc': short_consol_perc, 'debug_states': assessed_states_dict}
 
 
 if __name__ == '__main__':
@@ -602,3 +729,5 @@ if __name__ == '__main__':
     print("\nGoldenStrategy aggregation test finished.")
     settings.STRATEGY_TIMEFRAME = original_timeframe
     print(f"TEST: Restored STRATEGY_TIMEFRAME to {settings.STRATEGY_TIMEFRAME}.")
+
+[end of trading_bot/strategy/gold_strategy.py]

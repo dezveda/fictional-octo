@@ -40,7 +40,7 @@ class App(ctk.CTk):
         self.price_label = ctk.CTkLabel(self.price_signal_frame, text="N/A", font=ctk.CTkFont(size=20, weight="bold"), text_color=("green", "lightgreen"))
         self.price_label.grid(row=0, column=1, padx=(0,10), pady=10, sticky="w")
 
-        self.signal_label = ctk.CTkLabel(self.price_signal_frame, text="Signal: Initializing...", font=ctk.CTkFont(size=18, weight="bold"), text_color="yellow")
+        self.signal_label = ctk.CTkLabel(self.price_signal_frame, text="Signal: Awaiting strategy data...", font=ctk.CTkFont(size=18, weight="bold"), text_color="yellow") # Updated initial text
         self.signal_label.grid(row=0, column=2, padx=10, pady=10, sticky="e")
 
         self.main_content_frame.grid_rowconfigure(0, weight=0)
@@ -53,7 +53,7 @@ class App(ctk.CTk):
 
         self.indicators_frame = ctk.CTkScrollableFrame(self.indicators_outer_frame, corner_radius=3, height=150)
         self.indicators_frame.pack(fill="x", expand=True, padx=5, pady=5)
-        self.indicators_details_label = ctk.CTkLabel(self.indicators_frame, text="Calculating initial indicators...",
+        self.indicators_details_label = ctk.CTkLabel(self.indicators_frame, text="Waiting for strategy data...", # Updated initial text
                                                      font=ctk.CTkFont(size=14), justify="left", anchor="nw")
         self.indicators_details_label.pack(padx=5, pady=5, anchor="nw", fill="x")
 
@@ -141,14 +141,31 @@ class App(ctk.CTk):
 
     def update_signal_display(self, signal_info_str):
         try:
-            color = "white"
-            if "LONG" in signal_info_str.upper():
-                color = ("green", "lightgreen")
-            elif "SHORT" in signal_info_str.upper():
-                color = ("red", "salmon")
-            self.signal_label.configure(text=f"Signal: {signal_info_str}", text_color=color)
+            # logger_gui.debug(f"[GUI] update_signal_display received: '{signal_info_str}'") # DEBUG level
+
+            text_to_display = f"Signal: {signal_info_str}"
+            text_color = "#DCE4EE" # Default text color (light gray for dark theme)
+
+            if isinstance(signal_info_str, str):
+                upper_signal_str = signal_info_str.upper()
+                if "CONSOLIDATION:" in upper_signal_str:
+                    text_color = "#FFD700"  # Gold/Yellow
+                elif "LONG" in upper_signal_str and "@" in upper_signal_str: # Check for actual trade signal
+                    text_color = "#2ECC71"  # Green
+                elif "SHORT" in upper_signal_str and "@" in upper_signal_str: # Check for actual trade signal
+                    text_color = "#E74C3C"  # Red
+                elif "WAITING" in upper_signal_str or "AWAITING" in upper_signal_str or "INITIALIZING" in upper_signal_str or "CALCULATING" in upper_signal_str:
+                    text_color = "#7F8C8D"  # Gray
+            else:
+                text_to_display = f"Signal: Invalid data type ({type(signal_info_str)})"
+                text_color = "#E74C3C" # Error color
+
+            self.signal_label.configure(text=text_to_display, text_color=text_color)
         except Exception as e:
-            logger_gui.error(f"Error updating signal display: {e}", exc_info=False)
+            logger_gui.error(f"Error in update_signal_display: {e}", exc_info=False)
+            try:
+                self.signal_label.configure(text=f"Signal Display Error: {e}", text_color="red")
+            except Exception: pass # Avoid recursive errors
 
     def update_indicators_display(self, indicators_data):
         try:
