@@ -236,12 +236,12 @@ class App(ctk.CTk):
                      datetime_format='%H:%M',
                      xrotation=15,
                      show_nontrading=False,
-                     tight_layout=False,
+                     tight_layout=True, # Use mplfinance's tight_layout
                      update_width_config=dict(candle_linewidth=0.8, candle_width=0.5, volume_width=0.5)
                     )
             self.ax.set_title(f"{settings.STRATEGY_TIMEFRAME if 'settings' in globals() else 'N/A'} Candlestick Chart ({len(chart_data_df)} bars)", color='white', fontsize=10)
 
-            self.figure.tight_layout()
+            # self.figure.tight_layout() # Removed: Let mplfinance handle it or call before draw if still needed for other elements.
             self.canvas.draw()
             current_logger.info(f"[GUI] update_chart completed. Plotted {len(chart_data_df)} candles.")
         except Exception as e:

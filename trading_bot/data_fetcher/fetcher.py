@@ -61,8 +61,8 @@ class DataFetcher:
         logger.info(f"[DataFetcher] Initializing API client (timeout: {settings.REQUEST_TIMEOUT}s)...")
 
         try:
-            # python-binance AsyncClient uses 'requests_timeout' parameter
-            self.client = await AsyncClient.create(requests_timeout=settings.REQUEST_TIMEOUT)
+            # Corrected parameter for python-binance AsyncClient is 'request_timeout'
+            self.client = await AsyncClient.create(request_timeout=settings.REQUEST_TIMEOUT)
             self.bsm = BinanceSocketManager(self.client)
 
             # Perform a quick ping to ensure connectivity after creating client
