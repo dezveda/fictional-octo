@@ -183,13 +183,16 @@ class BotApplication:
                 # Start depth stream as a separate task
                 # Ensure client is available (which start_kline_stream should ensure)
                 # Also check if depth_socket_task attribute exists and if it's already running
+                logger.critical(f"[MainApp] Checking client and preparing for depth stream. self.fetcher.client state: {self.fetcher.client}")
                 if self.fetcher.client and \
                    not (hasattr(self.fetcher, 'depth_socket_task') and \
                         self.fetcher.depth_socket_task and \
                         not self.fetcher.depth_socket_task.done()):
                     logger.info("[MainApp] Creating task for DataFetcher depth stream...")
                     self.schedule_gui_update(self.gui_app.update_status_bar)("[MainApp] Starting live ORDER BOOK data stream...")
+                    logger.critical("[MainApp] ABOUT TO CREATE DataFetcher depth stream task.")
                     self.fetcher.depth_socket_task = asyncio.create_task(self.fetcher.start_depth_stream())
+                    logger.critical(f"[MainApp] DataFetcher depth stream task CREATED: {self.fetcher.depth_socket_task}")
                 elif not self.fetcher.client:
                     logger.warning("[MainApp] Cannot start depth stream: Fetcher client not initialized.")
                     self.schedule_gui_update(self.gui_app.update_status_bar)("[MainApp] Order book stream NOT started (client missing).")

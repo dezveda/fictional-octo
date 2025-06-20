@@ -66,37 +66,41 @@ class DataFetcher:
 
     async def _initialize_client(self):
         if self.client:
+            logger.info("[DataFetcher] Client already initialized.")
             return
 
         if self.on_status_update:
             self.on_status_update(f"[DataFetcher] Initializing API client (timeout: {settings.REQUEST_TIMEOUT}s)...")
         logger.info(f"[DataFetcher] Initializing API client (timeout: {settings.REQUEST_TIMEOUT}s)...")
+        # Ensure settings is imported if not already done at module level
+        # from trading_bot.utils import settings # This should be at the top of the file
 
+        client_created_successfully = False
         try:
             self.client = await AsyncClient.create(request_timeout=settings.REQUEST_TIMEOUT)
-            self.bsm = BinanceSocketManager(self.client)
+            self.bsm = BinanceSocketManager(self.client) # Initialize BSM here
             await self.client.ping()
+            client_created_successfully = True
             if self.on_status_update:
                 self.on_status_update("[DataFetcher] API Client initialized and ping successful.")
             logger.info("[DataFetcher] API Client initialized and ping successful.")
+
         except asyncio.TimeoutError:
-            self.client = None
-            self.bsm = None
+            self.client = None; self.bsm = None
             logger.error(f"[DataFetcher] API client initialization timed out after {settings.REQUEST_TIMEOUT}s.")
-            if self.on_status_update:
-                self.on_status_update(f"[DataFetcher] Error: Connection to Binance timed out ({settings.REQUEST_TIMEOUT}s). Check network/firewall.")
+            if self.on_status_update: self.on_status_update(f"[DataFetcher] Error: Connection to Binance timed out ({settings.REQUEST_TIMEOUT}s). Check network/firewall.")
         except aiohttp.ClientError as e:
-            self.client = None
-            self.bsm = None
+            self.client = None; self.bsm = None
             logger.error(f"[DataFetcher] API client initialization failed due to a network error: {e}", exc_info=True)
-            if self.on_status_update:
-                self.on_status_update(f"[DataFetcher] Error: Network issue connecting to Binance: {e}")
+            if self.on_status_update: self.on_status_update(f"[DataFetcher] Error: Network issue connecting to Binance: {e}")
         except Exception as e:
-            self.client = None
-            self.bsm = None
+            self.client = None; self.bsm = None
             logger.error(f"[DataFetcher] API client initialization failed: {e}", exc_info=True)
-            if self.on_status_update:
-                self.on_status_update(f"[DataFetcher] Error: API client initialization failed: {e}")
+            if self.on_status_update: self.on_status_update(f"[DataFetcher] Error: API client initialization failed: {e}")
+        finally:
+            logger.critical(f"[DataFetcher] _initialize_client: self.client is {self.client}, self.bsm is {getattr(self, 'bsm', None)} after create attempt. Success: {client_created_successfully}")
+            if not client_created_successfully: # If client creation failed, BSM might not be valid
+                self.bsm = None # Explicitly set BSM to None if client creation failed at any point
 
     def _process_kline_message(self, msg):
         if msg.get('e') == 'error':
@@ -120,6 +124,8 @@ class DataFetcher:
                 except Exception as e: logger.error(f'Error in on_kline_callback: {e}')
 
     def _process_depth_message(self, msg):
+        logger.critical("[DataFetcherOB] METHOD ENTRY: _process_depth_message() - A RAW DEPTH MESSAGE WAS RECEIVED FROM WEBSOCKET.")
+        logger.info(f"[DataFetcherOB] Full raw depth message received: {msg}")
         logger.debug(f"[DataFetcherOB] Received depth message summary: lastUpdateId={msg.get('lastUpdateId')}, bids_count={len(msg.get('bids',[]))}, asks_count={len(msg.get('asks',[]))}")
         if 'e' in msg and msg['e'] == 'error':
             logger.error(f"[DataFetcherOB] Depth stream error: {msg.get('m')}")
@@ -170,6 +176,7 @@ class DataFetcher:
             self.kline_socket = None # Clear socket ref
 
     async def start_depth_stream(self):
+        logger.critical("[DataFetcherOB] METHOD ENTRY: start_depth_stream()")
         if not self.client or not self.bsm:
             logger.error("[DataFetcherOB] Client/BSM not initialized. Cannot start depth stream.")
             if self.on_status_update: self.on_status_update("[OB Error] Client not ready.")
@@ -190,6 +197,7 @@ class DataFetcher:
         if self.on_status_update:
             self.on_status_update(f"[DataFetcherOB] Starting {self.symbol} partial depth stream (L{depth_level_int}@{update_speed_str})...")
         logger.info(f"[DataFetcherOB] Starting {self.symbol} partial depth stream (L{depth_level_int}@{update_speed_str})...")
+        logger.critical(f"[DataFetcherOB] Attempting to start BSM depth socket. Symbol: {self.symbol}, Level: {settings.ORDER_BOOK_STREAM_DEPTH_LEVEL}, Speed: {settings.ORDER_BOOK_UPDATE_SPEED_MS}")
 
         try:
             # For python-binance >= 1.0.17, use start_partial_book_depth_socket
@@ -209,6 +217,7 @@ class DataFetcher:
                 self.on_status_update(f"[DataFetcherOB] Partial depth stream for {self.symbol} initiated.")
             # Keep this task alive until stop_event or error
             while not (self.stop_event and self.stop_event.is_set()):
+                # logger.debug(f'[DataFetcherOB] start_depth_stream task alive, stop_event: {self.stop_event.is_set() if self.stop_event else "N/A"}') # Too verbose for 100ms stream
                 await asyncio.sleep(1) # Keep alive, check stop_event
             logger.info(f"[DataFetcherOB] Stop event for depth stream {self.symbol}.")
 
