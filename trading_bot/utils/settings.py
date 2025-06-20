@@ -13,6 +13,24 @@ LOG_LEVEL = "INFO" # e.g., DEBUG, INFO, WARNING, ERROR
 
 # Chart settings
 CHART_MAX_AGG_BARS_DISPLAY = 100 # Max number of aggregated bars to display on chart
+PRICE_PRECISION = 2 # Decimal places for price display on chart label
+MIN_BARS_FOR_PROVISIONAL_INDICATORS = 15 # Min bars in chart_df for provisional indicators to calculate meaningfully
+CHART_PRICE_LABEL_XOFFSET = 0.15 # X-offset for price label from right edge of last candle
+CHART_PRICE_LABEL_COLOR = 'white'
+CHART_PRICE_LABEL_BOXSTYLE = 'round,pad=0.15'
+CHART_PRICE_LABEL_BGCOLOR = '#202020'
+CHART_PRICE_LABEL_EDGECOLOR = 'gray'
+
+# Order Book Settings
+ORDER_BOOK_STREAM_DEPTH_LEVEL = 20 # For partial book depth (e.g., 5, 10, 20 for @depthX streams)
+LOCAL_ORDER_BOOK_MAX_LEVELS = 20   # How many levels of bids/asks to store and display locally
+ORDER_BOOK_UPDATE_SPEED_MS = "100ms" # Update speed for partial depth stream, e.g., '100ms' or '1000ms'
+
+# Liquidity Analysis Settings
+LIQUIDITY_SIGNIFICANT_QTY_THRESHOLD = 10 # Example: BTC quantity to be considered significant on L1/L2 book
+LIQUIDITY_CLUSTER_PRICE_RANGE_FACTOR = 0.001 # e.g., 0.1% of current price for clustering bids/asks
+LIQUIDITY_LEVELS_TO_CHECK = 2    # How many top bid/ask liquidity levels to check for S/R
+LIQUIDITY_GUI_LEVELS_TO_SHOW = 3 # Number of top bid/ask liquidity levels to show in GUI
 
 # Network Request Settings
 REQUEST_TIMEOUT = 30  # Seconds for Binance API requests

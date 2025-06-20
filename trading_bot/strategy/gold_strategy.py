@@ -15,11 +15,14 @@ import logging
 logger = logging.getLogger(__name__)
 
 class GoldenStrategy:
-    def __init__(self, on_status_update=None, on_indicators_update=None, on_signal_update=None, on_chart_update=None):
+    def __init__(self, on_status_update=None, on_indicators_update=None, on_signal_update=None, on_chart_update=None, on_liquidity_update_callback=None):
         self.on_status_update = on_status_update
         self.on_indicators_update = on_indicators_update
         self.on_signal_update = on_signal_update
         self.on_chart_update = on_chart_update
+        self.on_liquidity_update_callback = on_liquidity_update_callback
+        self.latest_order_book_snapshot = None
+        self.latest_liquidity_analysis = None
 
         self.raw_kline_max_len = 200
         self.raw_all_kline_data_deque = deque(maxlen=self.raw_kline_max_len)
@@ -210,7 +213,9 @@ class GoldenStrategy:
             if self.on_status_update:
                 status_msg = pivot_points_result.get('status', 'Pivot calculation failed or returned no data.') if pivot_points_result else 'Pivot analysis returned None.'
                 self.on_status_update(f"[GoldenStrategy] ({self.strategy_timeframe_str}) Daily pivots not available for this bar. Reason: {status_msg}")
-        liquidity_info = liquidity_analysis.analyze(self.agg_kline_data_deque, self.on_status_update)
+
+        # Use the latest analysis from order book data, if available
+        liquidity_info_for_signal = self.latest_liquidity_analysis
 
         signal = self._generate_signal(
             current_kline=self.agg_kline_data_deque[-1],
@@ -222,7 +227,7 @@ class GoldenStrategy:
             analysis={
                 'fibonacci': fib_analysis_result,
                 'pivots': pivot_points_result,
-                'liquidity': liquidity_info
+                'liquidity': liquidity_info_for_signal # Use order book derived liquidity
             }
         )
 
@@ -255,6 +260,21 @@ class GoldenStrategy:
             if self.on_status_update and not self.is_historical_fill_active:
                 self.on_status_update(f"[GoldenStrategy] ({self.strategy_timeframe_str}) No *trade* signal generated on this bar.")
 
+    def process_order_book_update(self, order_book_snapshot):
+        """ Processes new order book data and triggers liquidity analysis. """
+        self.latest_order_book_snapshot = order_book_snapshot
+        # logger.debug(f"[GoldenStrategy] Order book snapshot received. Top bid: {order_book_snapshot['bids'][0] if order_book_snapshot.get('bids') else 'N/A'}")
+
+        # Call liquidity analysis using the imported module
+        # The 'settings' module is globally available in this file.
+        self.latest_liquidity_analysis = liquidity_analysis.analyze(
+            order_book_snapshot,
+            settings,
+            self.on_status_update
+        )
+
+        if self.on_liquidity_update_callback and not self.is_historical_fill_active: # Assuming OB updates are live only
+            self.on_liquidity_update_callback(self.latest_liquidity_analysis)
 
     def process_new_kline(self, kline_data):
         self._process_incoming_kline(kline_data)
@@ -405,31 +425,63 @@ class GoldenStrategy:
         return 'NEUTRAL'
 
     def _assess_sr_levels(self, current_price, current_low, current_high, pivots, fib_analysis, liquidity_zones):
+        method_body_indent = "        " # Assuming 8 spaces for method body based on typical class structure
         if current_price is None: return 'NEUTRAL_SR'
         prox_factor = getattr(settings, 'SR_PROXIMITY_FACTOR', 0.003)
 
+        # 1. Check Pivots
         if pivots and pivots.get('daily_pivots'):
             s1 = pivots['daily_pivots'].get('S1')
             r1 = pivots['daily_pivots'].get('R1')
-            if s1 and current_low <= s1 * (1 + prox_factor) and current_price > s1: return 'BOUNCE_SUPPORT_PIVOT'
-            if r1 and current_high >= r1 * (1 - prox_factor) and current_price < r1: return 'REJECT_RESISTANCE_PIVOT'
-            if r1 and current_price > r1 : return 'BREAKOUT_ABOVE_R1_PIVOT'
-            if s1 and current_price < s1 : return 'BREAKDOWN_BELOW_S1_PIVOT'
+            if s1 and current_low <= s1 * (1 + prox_factor) and current_price > s1:
+                logger.debug(f"[SR_Assess] Bounce detected off Pivot S1: {s1:.2f}")
+                return 'BOUNCE_SUPPORT_PIVOT'
+            if r1 and current_high >= r1 * (1 - prox_factor) and current_price < r1:
+                logger.debug(f"[SR_Assess] Rejection detected at Pivot R1: {r1:.2f}")
+                return 'REJECT_RESISTANCE_PIVOT'
+            # Stronger conditions for breakout/breakdown (e.g. close beyond pivot)
+            if r1 and current_price > r1 * (1 + prox_factor / 2): # Closed clearly above R1
+                logger.debug(f"[SR_Assess] Breakout above Pivot R1: {r1:.2f}")
+                return 'BREAKOUT_ABOVE_R1_PIVOT'
+            if s1 and current_price < s1 * (1 - prox_factor / 2): # Closed clearly below S1
+                logger.debug(f"[SR_Assess] Breakdown below Pivot S1: {s1:.2f}")
+                return 'BREAKDOWN_BELOW_S1_PIVOT'
 
-        if fib_analysis and fib_analysis.get('retracement_levels_A_to_B'):
-            levels = fib_analysis['retracement_levels_A_to_B']
-            for fib_val_key in [0.5, 0.618]:
+        # 2. Check Fibonacci Levels
+        # Assuming 'retracement_levels_from_B' is the correct key based on fibonacci_analysis.py
+        if fib_analysis and fib_analysis.get('retracement_levels_from_B'):
+            levels = fib_analysis['retracement_levels_from_B']
+            for fib_val_key in [0.5, 0.618]: # Check common levels
                 fib_level_price = levels.get(fib_val_key)
                 if fib_level_price:
-                    if fib_analysis.get('trend_type') == 'uptrend' and current_low <= fib_level_price * (1 + prox_factor) and current_price > fib_level_price: return 'BOUNCE_SUPPORT_FIB'
-                    if fib_analysis.get('trend_type') == 'downtrend' and current_high >= fib_level_price * (1 - prox_factor) and current_price < fib_level_price: return 'REJECT_RESISTANCE_FIB'
+                    if fib_analysis.get('trend_type') == 'uptrend' and current_low <= fib_level_price * (1 + prox_factor) and current_price > fib_level_price:
+                        logger.debug(f"[SR_Assess] Bounce detected off Fib {fib_val_key*100:.1f}% support: {fib_level_price:.2f}")
+                        return 'BOUNCE_SUPPORT_FIB'
+                    if fib_analysis.get('trend_type') == 'downtrend' and current_high >= fib_level_price * (1 - prox_factor) and current_price < fib_level_price:
+                        logger.debug(f"[SR_Assess] Rejection detected at Fib {fib_val_key*100:.1f}% resistance: {fib_level_price:.2f}")
+                        return 'REJECT_RESISTANCE_FIB'
 
-        if liquidity_zones and liquidity_zones.get('volume_profile_data', {}).get('high_volume_zones'):
-            for zone in liquidity_zones['volume_profile_data']['high_volume_zones'][:1]:
-                zone_price = zone['price_level']
-                if current_low <= zone_price * (1 + prox_factor) and current_price > zone_price: return 'BOUNCE_SUPPORT_LIQ'
-                if current_high >= zone_price * (1 - prox_factor) and current_price < zone_price: return 'REJECT_RESISTANCE_LIQ'
-        return 'NEUTRAL_SR'
+        # 3. Check Order Book Liquidity Levels (New Logic)
+        # 'liquidity_zones' argument now contains the result from order-book based liquidity_analysis.analyze()
+        if liquidity_zones and isinstance(liquidity_zones, dict):
+            significant_bids = liquidity_zones.get('significant_bids', [])
+            significant_asks = liquidity_zones.get('significant_asks', [])
+
+            # Check top N significant bids (e.g., top 1-2 from liquidity_analysis which sorts by qty)
+            for bid_info in significant_bids[:getattr(settings, 'LIQUIDITY_LEVELS_TO_CHECK', 2)] :
+                bid_price = bid_info['price']
+                if current_low <= bid_price * (1 + prox_factor) and current_price > bid_price:
+                    logger.debug(f"[SR_Assess] Bounce detected off OB liquidity (bid): {bid_price:.2f} (Qty: {bid_info['qty']})")
+                    return 'BOUNCE_SUPPORT_LIQ'
+
+            # Check top N significant asks
+            for ask_info in significant_asks[:getattr(settings, 'LIQUIDITY_LEVELS_TO_CHECK', 2)]:
+                ask_price = ask_info['price']
+                if current_high >= ask_price * (1 - prox_factor) and current_price < ask_price:
+                    logger.debug(f"[SR_Assess] Rejection detected at OB liquidity (ask): {ask_price:.2f} (Qty: {ask_info['qty']})")
+                    return 'REJECT_RESISTANCE_LIQ'
+
+        return 'NEUTRAL_SR' # Default if no specific S/R interaction found
 
     def _assess_volume(self, current_agg_kline, agg_volume_series):
         if current_agg_kline is None or not hasattr(agg_volume_series, 'mean') or agg_volume_series.empty: return 'NEUTRAL_VOLUME'
