@@ -5,6 +5,7 @@ import aiohttp # For aiohttp.ClientError
 from binance import AsyncClient, BinanceSocketManager
 import logging
 from trading_bot.utils import settings
+from copy import deepcopy # For get_order_book_snapshot
 
 # Configure logging for the fetcher
 logger = logging.getLogger(__name__)
@@ -14,7 +15,7 @@ class DataFetcher:
     def _map_interval_str_to_api_const(self, interval_str):
         # Mapping from settings string to python-binance AsyncClient constants
         mapping = {
-            # "1s": AsyncClient.KLINE_INTERVAL_1SECOND, # Typically not available for historical bulk fetch / may cause issues. WebSocket uses direct string for 1s.
+            # "1s": AsyncClient.KLINE_INTERVAL_1SECOND, # WebSocket uses direct string for 1s if needed.
             "1m": AsyncClient.KLINE_INTERVAL_1MINUTE,
             "3m": AsyncClient.KLINE_INTERVAL_3MINUTE,
             "5m": AsyncClient.KLINE_INTERVAL_5MINUTE,
@@ -31,260 +32,265 @@ class DataFetcher:
         const = mapping.get(interval_str.lower())
         if const is None:
             logger.warning(f"[DataFetcher] Unsupported kline interval string: {interval_str}. Defaulting to 1m.")
-            if self.on_status_update: # Ensure on_status_update is callable
+            if self.on_status_update:
                  self.on_status_update(f"[DataFetcher] Warning: Unsupported interval {interval_str}, using 1m.")
             return AsyncClient.KLINE_INTERVAL_1MINUTE
         return const
 
-    def __init__(self, symbol=settings.TRADING_SYMBOL, on_kline_callback=None, on_price_update_callback=None, on_status_update=None, stop_event=None):
+    def __init__(self, symbol=settings.TRADING_SYMBOL,
+                 on_kline_callback=None,
+                 on_price_update_callback=None,
+                 on_status_update=None,
+                 stop_event=None,
+                 on_orderbook_update_callback=None): # New callback
         self.symbol = symbol
         self.client = None
         self.bsm = None
-        self.socket = None
+        self.kline_socket = None # Renamed from self.socket for clarity
+        self.depth_socket = None   # For the depth stream socket object
         self.latest_price = None
         self.latest_kline_data = None
-        self.on_kline_callback = on_kline_callback # For strategy processing
-        self.on_price_update_callback = on_price_update_callback # For GUI price updates
-        self.on_status_update = on_status_update # For status bar updates
-        self.stop_event = stop_event # For graceful shutdown
+        self.on_kline_callback = on_kline_callback
+        self.on_price_update_callback = on_price_update_callback
+        self.on_status_update = on_status_update
+        self.stop_event = stop_event
 
         self.fetch_interval_str = settings.KLINE_FETCH_INTERVAL
         self.api_interval = self._map_interval_str_to_api_const(self.fetch_interval_str)
 
+        # Order Book related attributes
+        self.order_book = {'bids': {}, 'asks': {}} # Store as {price_float: quantity_float}
+        self.local_ob_max_levels = settings.LOCAL_ORDER_BOOK_MAX_LEVELS
+        self.on_orderbook_update_callback = on_orderbook_update_callback
+        self.depth_socket_task = None # To keep track of the depth stream task
 
     async def _initialize_client(self):
         if self.client:
-            return # Already initialized
+            return
 
         if self.on_status_update:
             self.on_status_update(f"[DataFetcher] Initializing API client (timeout: {settings.REQUEST_TIMEOUT}s)...")
         logger.info(f"[DataFetcher] Initializing API client (timeout: {settings.REQUEST_TIMEOUT}s)...")
 
         try:
-            # Corrected parameter for python-binance AsyncClient is 'request_timeout'
             self.client = await AsyncClient.create(request_timeout=settings.REQUEST_TIMEOUT)
             self.bsm = BinanceSocketManager(self.client)
-
-            # Perform a quick ping to ensure connectivity after creating client
             await self.client.ping()
             if self.on_status_update:
                 self.on_status_update("[DataFetcher] API Client initialized and ping successful.")
             logger.info("[DataFetcher] API Client initialized and ping successful.")
-
-        except asyncio.TimeoutError: # Specifically catch asyncio.TimeoutError
-            self.client = None # Ensure client is None on failure
+        except asyncio.TimeoutError:
+            self.client = None
             self.bsm = None
             logger.error(f"[DataFetcher] API client initialization timed out after {settings.REQUEST_TIMEOUT}s.")
             if self.on_status_update:
                 self.on_status_update(f"[DataFetcher] Error: Connection to Binance timed out ({settings.REQUEST_TIMEOUT}s). Check network/firewall.")
-        except aiohttp.ClientError as e: # Catch network-related errors from aiohttp
+        except aiohttp.ClientError as e:
             self.client = None
             self.bsm = None
             logger.error(f"[DataFetcher] API client initialization failed due to a network error: {e}", exc_info=True)
             if self.on_status_update:
                 self.on_status_update(f"[DataFetcher] Error: Network issue connecting to Binance: {e}")
         except Exception as e:
-            self.client = None # Ensure client is None on any other failure
+            self.client = None
             self.bsm = None
             logger.error(f"[DataFetcher] API client initialization failed: {e}", exc_info=True)
             if self.on_status_update:
                 self.on_status_update(f"[DataFetcher] Error: API client initialization failed: {e}")
 
     def _process_kline_message(self, msg):
-        '''
-        Processes a kline/candlestick message.
-        Example kline message:
-        {
-            "e": "kline",					// event type
-            "E": 1499404907056,				// event time
-            "s": "ETHBTC",					// symbol
-            "k": {
-                "t": 1499404860000, 		// kline start time
-                "T": 1499404919999, 		// kline close time
-                "s": "ETHBTC",				// symbol
-                "i": "1m",					// interval
-                "f": 77462,					// first trade id
-                "L": 77465,					// last trade id
-                "o": "0.10278577",			// open
-                "c": "0.10278645",			// close
-                "h": "0.10278712",			// high
-                "l": "0.10278518",			// low
-                "v": "17.47929838",			// volume
-                "n": 4,						// number of trades
-                "x": false,					// is this kline closed?
-                "q": "1.79662878",			// quote asset volume
-                "V": "2.34879809",			// taker buy base asset volume
-                "Q": "0.24142730",			// taker buy quote asset volume
-                "B": "13279784.01349473"	// ignore
-            }
-        }
-        '''
         if msg.get('e') == 'error':
             logger.error(f"WebSocket Error: {msg.get('m')}")
-            if self.on_status_update:
-                self.on_status_update(f"[DataFetcher] Error: {msg.get('m')}")
+            if self.on_status_update: self.on_status_update(f"[DataFetcher] Error: {msg.get('m')}")
             return
 
         if msg.get('e') == 'kline':
             kline = msg.get('k', {})
-            self.latest_price = float(kline.get('c')) # Closing price of the kline
-            self.latest_kline_data = kline # kline is a dict like {'t':..., 'o':..., 'h':..., 'l':..., 'c':..., 'v':...}
-            # logger.info(f"Symbol: {kline.get('s')}, Interval: {kline.get('i')}, Close: {self.latest_price}, Time: {kline.get('T')}")
+            self.latest_price = float(kline.get('c'))
+            self.latest_kline_data = kline
 
-            # Callbacks with new data
             if self.on_price_update_callback and self.latest_price is not None:
                 logger.debug(f"[DataFetcher] Live kline. Latest price: {self.latest_price}. Triggering on_price_update_callback if callback set.")
                 try:
-                    self.on_price_update_callback(f"{self.latest_price:.2f}") # Pass formatted string
-                except Exception as e:
-                    logger.error(f'Error in on_price_update_callback: {e}')
+                    self.on_price_update_callback(f"{self.latest_price:.2f}")
+                except Exception as e: logger.error(f'Error in on_price_update_callback: {e}')
             if self.on_kline_callback and self.latest_kline_data:
                 try:
-                    self.on_kline_callback(self.latest_kline_data) # Pass full kline dict
-                except Exception as e:
-                    logger.error(f'Error in on_kline_callback: {e}')
+                    self.on_kline_callback(self.latest_kline_data)
+                except Exception as e: logger.error(f'Error in on_kline_callback: {e}')
 
-            if self.on_status_update:
-                # This might be too verbose for every message, consider updating status less frequently
-                # self.on_status_update(f"[DataFetcher] {self.symbol} Price: {self.latest_price}")
-                pass
+    def _process_depth_message(self, msg):
+        if 'e' in msg and msg['e'] == 'error':
+            logger.error(f"[DataFetcherOB] Depth stream error: {msg.get('m')}")
+            if self.on_status_update: self.on_status_update(f"[OB Error] {msg.get('m')}")
+            return
 
+        try:
+            new_bids = {float(price_level): float(qty) for price_level, qty in msg.get('bids', [])[:self.local_ob_max_levels]}
+            new_asks = {float(price_level): float(qty) for price_level, qty in msg.get('asks', [])[:self.local_ob_max_levels]}
 
-    async def start_fetching(self):
-        await self._initialize_client()
+            self.order_book['bids'] = new_bids
+            self.order_book['asks'] = new_asks
+
+            if self.on_orderbook_update_callback:
+                self.on_orderbook_update_callback(self.get_order_book_snapshot())
+        except Exception as e:
+            logger.error(f"[DataFetcherOB] Error processing depth message: {e}. Msg: {msg}", exc_info=True)
+
+    async def start_kline_stream(self): # Renamed from start_fetching for clarity
+        if not self.client or not self.bsm:
+            logger.error("[DataFetcher] Client/BSM not initialized. Cannot start kline stream.")
+            if self.on_status_update: self.on_status_update("[KlineStream Error] Client not ready.")
+            return
 
         if self.on_status_update:
             self.on_status_update(f"[DataFetcher] Starting {self.symbol} {self.fetch_interval_str} kline WebSocket...")
 
-        self.socket = self.bsm.kline_socket(symbol=self.symbol, interval=self.api_interval)
+        self.kline_socket = self.bsm.kline_socket(symbol=self.symbol, interval=self.api_interval)
 
         try:
-            async with self.socket as stream:
+            async with self.kline_socket as stream:
                 if self.on_status_update:
-                    self.on_status_update(f"[DataFetcher] WebSocket connection established for {self.symbol} {self.fetch_interval_str}.")
+                    self.on_status_update(f"[DataFetcher] Kline WebSocket connection established for {self.symbol} {self.fetch_interval_str}.")
                 while True:
                     if self.stop_event and self.stop_event.is_set():
-                        logger.info("[DataFetcher] Stop event received, exiting WebSocket loop.")
+                        logger.info("[DataFetcher] Stop event received, exiting kline WebSocket loop.")
                         break
                     msg = await stream.recv()
                     self._process_kline_message(msg)
         except Exception as e:
-            logger.error(f"[DataFetcher] WebSocket connection error or processing error: {e}", exc_info=True)
-            if self.on_status_update:
-                self.on_status_update(f"[DataFetcher] WebSocket Error: {e}. Check logs.")
-            # No auto-reconnect here, main app would need to handle restart or fetcher crash
+            logger.error(f"[DataFetcher] Kline WebSocket connection error: {e}", exc_info=True)
+            if self.on_status_update: self.on_status_update(f"[KlineStream Error] WebSocket Error: {e}. Check logs.")
         finally:
-            logger.info("[DataFetcher] Exited WebSocket loop.")
-            # self.client might be None if _initialize_client failed or stop_fetching was called already
-            if self.client and self.bsm: # bsm depends on client
-                 logger.info("[DataFetcher] Attempting to close BinanceSocketManager and client connection in start_fetching finally block.")
-                 # Closing the bsm explicitly might not always be necessary if client.close_connection handles it.
-                 # await self.bsm.close() # This might not be the correct way to close BSM sockets fully.
-                                        # The individual socket `self.socket` is closed by `async with`.
-                 await self.client.close_connection()
-                 logger.info("[DataFetcher] Client connection closed in start_fetching finally.")
-                 self.client = None # Ensure client is None after closing
-                 self.bsm = None # BSM is unusable without client
-                 self.socket = None
+            logger.info("[DataFetcher] Exited kline WebSocket loop.")
+            self.kline_socket = None # Clear socket ref
 
+    async def start_depth_stream(self):
+        if not self.client or not self.bsm:
+            logger.error("[DataFetcherOB] Client/BSM not initialized. Cannot start depth stream.")
+            if self.on_status_update: self.on_status_update("[OB Error] Client not ready.")
+            return
 
-    async def stop_fetching(self):
+        depth_level_int = settings.ORDER_BOOK_STREAM_DEPTH_LEVEL
+        update_speed_str = settings.ORDER_BOOK_UPDATE_SPEED_MS
+        # Construct stream name as per python-binance e.g. 'btcusdt@depth20@100ms'
+        # OR use specific parameters if start_depth_socket supports them (check library version)
+        # For recent versions, it's start_partial_book_depth_socket(symbol, level, speed, callback)
+        # Assuming the version where callback is used with start_partial_book_depth_socket:
+
+        # The prompt's example used `bsm.start_depth_socket` which is for *diff* depth stream.
+        # For partial book depth (snapshots), it's `start_partial_book_depth_socket`.
+        # Let's use partial book depth as it's simpler to manage state (no merging diffs).
+        # Stream name: f"{self.symbol.lower()}@depth{depth_level_int}@{update_speed_str}"
+
         if self.on_status_update:
-            self.on_status_update(f"[DataFetcher] Stopping data fetching...")
-        if self.client:
-            await self.client.close_connection()
+            self.on_status_update(f"[DataFetcherOB] Starting {self.symbol} partial depth stream (L{depth_level_int}@{update_speed_str})...")
+        logger.info(f"[DataFetcherOB] Starting {self.symbol} partial depth stream (L{depth_level_int}@{update_speed_str})...")
+
+        try:
+            # For python-binance >= 1.0.17, use start_partial_book_depth_socket
+            self.depth_socket = self.bsm.start_partial_book_depth_socket(
+                symbol=self.symbol,
+                level=depth_level_int,
+                interval=update_speed_str, #This is the 'speed' param, e.g. '100ms'
+                callback=self._process_depth_message
+            )
+            # This method in BSM starts the task; we don't need to run a recv loop here.
+            # We need to await BSM.start() in main.py if not already done for other sockets.
+            # For now, assume BSM is started elsewhere or this call is enough.
+            # The 'socket' returned by BSM when using callbacks is often just a control object or None.
+            # The actual socket runs in BSM's context.
             if self.on_status_update:
-                self.on_status_update(f"[DataFetcher] Connection closed.")
+                self.on_status_update(f"[DataFetcherOB] Partial depth stream for {self.symbol} initiated.")
+            # Keep this task alive until stop_event or error
+            while not (self.stop_event and self.stop_event.is_set()):
+                await asyncio.sleep(1) # Keep alive, check stop_event
+            logger.info(f"[DataFetcherOB] Stop event for depth stream {self.symbol}.")
+
+        except Exception as e:
+            logger.error(f"[DataFetcherOB] Partial depth stream for {self.symbol} encountered an error: {e}", exc_info=True)
+            if self.on_status_update:
+                self.on_status_update(f"[OB Error] Partial depth stream failed: {e}")
+        finally:
+            logger.info(f"[DataFetcherOB] Partial depth stream for {self.symbol} has stopped.")
+            # BSM handles socket closure on bsm.close() or when individual socket tasks are cancelled.
+            # If a socket object was returned and stored in self.depth_socket, it would be closed.
+            # With callback-based BSM sockets, explicit closure here might not be needed if BSM handles it.
+            self.depth_socket = None
+
+    async def stop_all_streams(self): # Renamed from stop_fetching for clarity
+        if self.on_status_update:
+            self.on_status_update(f"[DataFetcher] Stopping all streams...")
+
+        if self.stop_event: # Signal all managed tasks to stop
+            self.stop_event.set()
+
+        # If kline_socket was managed by `async with`, it closes on exit.
+        # If depth_socket_task holds an asyncio.Task, it needs to be cancelled.
+        if self.depth_socket_task and not self.depth_socket_task.done():
+            logger.info('[DataFetcher] Cancelling depth socket task...')
+            self.depth_socket_task.cancel()
+            try: await self.depth_socket_task
+            except asyncio.CancelledError: logger.info('[DataFetcher] Depth socket task cancelled successfully.')
+            except Exception as e_cancel: logger.error(f'[DataFetcher] Error awaiting cancelled depth task: {e_cancel}')
+        self.depth_socket_task = None
+
+        # The kline_socket (self.kline_socket) if run with `async with` will close when its loop exits.
+        # The BSM manages its own sockets. A call to bsm.close() would be more general if needed.
+        # However, client.close_connection() is the most common way to shut down all connections.
+        if self.client:
+            logger.info("[DataFetcher] Closing client connection (should stop BSM sockets)...")
+            await self.client.close_connection()
+            if self.on_status_update: self.on_status_update(f"[DataFetcher] Client connection closed.")
         self.client = None
         self.bsm = None
-        self.socket = None
+        self.kline_socket = None
+        self.depth_socket = None
 
-    async def fetch_historical_klines(self, symbol_to_fetch, interval_for_api, lookback_start_str=None, limit=None): # Removed end_time_ms
-        """
-        Fetches historical kline data from Binance.
-        symbol_to_fetch: The trading symbol (e.g., "BTCUSDT").
-        interval_for_api: The kline interval string compatible with python-binance (e.g., AsyncClient.KLINE_INTERVAL_1MINUTE).
-        lookback_start_str: A string like "10 days ago UTC", "200 hours ago UTC". Used if limit is None.
-        limit: Number of klines to fetch. If 'lookback_start_str' is also provided, 'limit' might be ignored or used by the library for pagination control.
-               If only 'limit' is provided, it fetches the most recent 'limit' klines.
 
-        Returns: A list of processed kline dictionaries, or an empty list if an error occurs or no data.
-                 Each kline dict: {'t': ms_timestamp, 'o': float, 'h': float, 'l': float, 'c': float, 'v': float}
-        """
+    async def fetch_historical_klines(self, symbol_to_fetch, interval_for_api, lookback_start_str=None, limit=None):
         if not self.client:
             logger.info("[DataFetcher] Client not initialized. Initializing for historical data fetch...")
-            await self._initialize_client() # Ensure client is ready
+            await self._initialize_client()
             if not self.client:
                 logger.error("[DataFetcher] Failed to initialize client for historical data.")
-                if self.on_status_update:
-                    self.on_status_update("[DataFetcher] Error: Failed to initialize client for historical data.")
+                if self.on_status_update: self.on_status_update("[DataFetcher] Error: Failed to initialize client for historical data.")
                 return []
 
         if self.on_status_update:
             status_msg = f"[DataFetcher] Fetching historical klines for {symbol_to_fetch}, interval {interval_for_api}..."
-            if limit and not lookback_start_str:
-                status_msg += f" Last {limit} klines."
-            elif lookback_start_str:
-                status_msg += f" Starting from {lookback_start_str}."
-            else: # limit and lookback_start_str are None - this case needs to be handled or prevented
-                 logger.warning("[DataFetcher] fetch_historical_klines called without lookback_start_str or limit.")
-                 return [] # Or default to a small limit
+            if limit and not lookback_start_str: status_msg += f" Last {limit} klines."
+            elif lookback_start_str: status_msg += f" Starting from {lookback_start_str}."
+            else: logger.warning("[DataFetcher] fetch_historical_klines called without lookback_start_str or limit."); return []
             self.on_status_update(status_msg)
 
         logger.info(f"Fetching historical data: Symbol={symbol_to_fetch}, Interval={interval_for_api}, Start={lookback_start_str}, Limit={limit}")
 
         try:
-            if lookback_start_str: # Prioritize lookback_start_str if provided
-                raw_klines = await self.client.get_historical_klines(
-                    symbol=symbol_to_fetch,
-                    interval=interval_for_api,
-                    start_str=lookback_start_str
-                    # Not passing limit here intentionally; let start_str define the range.
-                    # The library handles pagination and will fetch all klines from start_str to now.
-                    # If a specific end is needed, it would be 'end_str' or an equivalent timestamp for 'endtime'.
-                )
-            elif limit: # Fetch last 'limit' klines if no lookback_start_str
-                raw_klines = await self.client.get_historical_klines(
-                    symbol=symbol_to_fetch,
-                    interval=interval_for_api,
-                    limit=limit
-                )
-            else:
-                logger.error("[DataFetcher] Invalid parameters for historical kline fetch.")
-                return []
-
+            if lookback_start_str:
+                raw_klines = await self.client.get_historical_klines(symbol=symbol_to_fetch, interval=interval_for_api, start_str=lookback_start_str)
+            elif limit:
+                raw_klines = await self.client.get_historical_klines(symbol=symbol_to_fetch, interval=interval_for_api, limit=limit)
+            else: logger.error("[DataFetcher] Invalid parameters for historical kline fetch."); return []
         except Exception as e:
             logger.error(f"[DataFetcher] Error fetching historical klines: {e}", exc_info=True)
-            if self.on_status_update:
-                self.on_status_update(f"[DataFetcher] Error fetching historical klines: {e}")
+            if self.on_status_update: self.on_status_update(f"[DataFetcher] Error fetching historical klines: {e}")
             return []
 
         processed_klines = []
         if raw_klines:
             for k in raw_klines:
-                # Raw kline format: [timestamp, open, high, low, close, volume, close_time, ...]
                 try:
-                    processed_kline = {
-                        't': int(k[0]),        # Millisecond timestamp (start of kline)
-                        'o': float(k[1]),
-                        'h': float(k[2]),
-                        'l': float(k[3]),
-                        'c': float(k[4]),
-                        'v': float(k[5])
-                    }
+                    processed_kline = {'t': int(k[0]),'o': float(k[1]),'h': float(k[2]),'l': float(k[3]),'c': float(k[4]),'v': float(k[5])}
                     processed_klines.append(processed_kline)
                 except (IndexError, ValueError) as conversion_e:
                     logger.error(f"[DataFetcher] Error processing raw kline data: {conversion_e}. Data: {k}")
-                    continue # Skip this kline
-
-            if self.on_status_update:
-                self.on_status_update(f"[DataFetcher] Successfully fetched and processed {len(processed_klines)} historical klines.")
+                    continue
+            if self.on_status_update: self.on_status_update(f"[DataFetcher] Successfully fetched and processed {len(processed_klines)} historical klines.")
             logger.info(f"Fetched {len(processed_klines)} historical klines for {symbol_to_fetch}.")
         else:
-            if self.on_status_update:
-                self.on_status_update(f"[DataFetcher] No historical klines returned for {symbol_to_fetch} with given parameters.")
+            if self.on_status_update: self.on_status_update(f"[DataFetcher] No historical klines returned for {symbol_to_fetch} with given parameters.")
             logger.info(f"No historical klines returned for {symbol_to_fetch} with params: interval={interval_for_api}, start={lookback_start_str}, limit={limit}")
-
         return processed_klines
 
     def get_latest_price(self):
@@ -293,38 +299,76 @@ class DataFetcher:
     def get_latest_kline(self):
         return self.latest_kline_data
 
+    def get_order_book_snapshot(self, num_levels=None):
+        if num_levels is None:
+            num_levels = self.local_ob_max_levels
+
+        # Use deepcopy to prevent modification of internal state if caller modifies the snapshot
+        temp_order_book = deepcopy(self.order_book)
+
+        sorted_bids = sorted(temp_order_book['bids'].items(), key=lambda item: item[0], reverse=True)
+        sorted_asks = sorted(temp_order_book['asks'].items(), key=lambda item: item[0])
+
+        return {
+            'bids': sorted_bids[:num_levels],
+            'asks': sorted_asks[:num_levels]
+        }
+
 # Example Usage (for testing purposes, will be removed or refactored)
 async def main_test():
+    def print_status(message): print(f"STATUS: {message}")
+    def handle_new_kline_for_test(kline_data): print(f"KLINE_TEST_CALLBACK: Close: {kline_data['c']}, Time: {kline_data['t']}")
+    def handle_new_price_for_test(price_str): print(f"PRICE_TEST_CALLBACK: Price: {price_str}")
+    def handle_ob_update_for_test(ob_snapshot):
+        print(f"OB_CALLBACK: Top Bid: {ob_snapshot['bids'][0] if ob_snapshot['bids'] else 'N/A'}, Top Ask: {ob_snapshot['asks'][0] if ob_snapshot['asks'] else 'N/A'}")
 
-    def print_status(message):
-        print(f"STATUS: {message}")
-
-    def handle_new_kline_for_test(kline_data):
-        print(f"KLINE_TEST_CALLBACK: Close: {kline_data['c']}, Time: {kline_data['t']}")
-
-    def handle_new_price_for_test(price_str):
-        print(f"PRICE_TEST_CALLBACK: Price: {price_str}")
-
+    stop_event_test = asyncio.Event() # For testing stop
     fetcher = DataFetcher(
-        # symbol="BTCUSDT", # Now uses default from settings
         on_kline_callback=handle_new_kline_for_test,
         on_price_update_callback=handle_new_price_for_test,
-        on_status_update=print_status
+        on_status_update=print_status,
+        on_orderbook_update_callback=handle_ob_update_for_test,
+        stop_event=stop_event_test
     )
 
     try:
-        print_status("Attempting to start fetching...")
-        await fetcher.start_fetching()
-    except KeyboardInterrupt:
-        print_status("Keyboard interrupt received. Stopping...")
+        print_status("Attempting to initialize client for tests...")
+        await fetcher._initialize_client() # Manually init for some tests
+        if not fetcher.client:
+            print_status("Client initialization failed. Skipping further tests.")
+            return
+
+        print_status("Fetching sample historical klines (last 5 of 1m)...")
+        hist_klines = await fetcher.fetch_historical_klines(
+            symbol_to_fetch="BTCUSDT",
+            interval_for_api=AsyncClient.KLINE_INTERVAL_1MINUTE,
+            limit=5
+        )
+        if hist_klines:
+            print_status(f"Fetched {len(hist_klines)} historical klines. First: {hist_klines[0]}, Last: {hist_klines[-1]}")
+        else:
+            print_status("No historical klines fetched for test.")
+
+        print_status("Starting kline and depth streams for 5 seconds...")
+        # Run streams concurrently for testing
+        kline_task = asyncio.create_task(fetcher.start_kline_stream())
+        depth_task = asyncio.create_task(fetcher.start_depth_stream())
+        fetcher.depth_socket_task = depth_task # Assign for stop_fetching to find
+
+        await asyncio.sleep(5) # Let them run for a bit
+        print_status("5 seconds passed. Requesting stop.")
+        stop_event_test.set() # Signal tasks to stop
+
+        await asyncio.gather(kline_task, depth_task, return_exceptions=True) # Wait for tasks to finish
+        print_status("Streams should be stopped.")
+
     except Exception as e:
         print_status(f"Unhandled error in main_test: {e}")
     finally:
-        await fetcher.stop_fetching()
+        print_status("Calling final stop_all_streams...")
+        await fetcher.stop_all_streams() # Ensure cleanup
         print_status("Fetching stopped.")
 
 if __name__ == '__main__':
-    # This part is for direct testing of the fetcher.py file.
-    # To run: python trading_bot/data_fetcher/fetcher.py
     print("Starting DataFetcher test...")
     asyncio.run(main_test())

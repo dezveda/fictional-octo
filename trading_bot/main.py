@@ -23,6 +23,7 @@ class BotApplication:
             on_status_update=self.schedule_gui_update(self.gui_app.update_status_bar),
             on_indicators_update=self.schedule_gui_update(self.gui_app.update_indicators_display),
             on_signal_update=self.schedule_gui_update(self.gui_app.update_signal_display),
+            on_liquidity_update_callback=self.schedule_gui_update(self.gui_app.update_liquidity_display),
             on_chart_update=self.schedule_gui_update(self.gui_app.update_chart) # Add chart update callback
         )
 
@@ -54,6 +55,12 @@ class BotApplication:
         """
         # logger.debug(f"MainApp: Received kline, c={kline_data.get('c')}") # Can be too verbose
         self.strategy.process_new_kline(kline_data)
+
+    def handle_new_orderbook_data(self, orderbook_snapshot):
+        """ Passes order book updates to the strategy. """
+        # logger.debug(f"[MainApp] Received order book snapshot. Top bid: {orderbook_snapshot['bids'][0] if orderbook_snapshot['bids'] else 'N/A'}")
+        if self.strategy:
+            self.strategy.process_order_book_update(orderbook_snapshot)
 
     async def start_fetcher_async(self):
         """ Coroutine to run the DataFetcher, including historical fill. """
@@ -164,8 +171,26 @@ class BotApplication:
 
             # 2. Start live WebSocket fetching
             if not self.stop_event.is_set(): # Only start if not already shutting down
-                self.schedule_gui_update(self.gui_app.update_status_bar)("[MainApp] Starting live data fetching...")
-                await self.fetcher.start_fetching()
+                self.schedule_gui_update(self.gui_app.update_status_bar)("[MainApp] Starting live KLINE data stream...")
+                # Start kline stream
+                # The start_kline_stream method now handles client initialization if not already done.
+                await self.fetcher.start_kline_stream() # Renamed from start_fetching
+
+                # Start depth stream as a separate task
+                # Ensure client is available (which start_kline_stream should ensure)
+                # Also check if depth_socket_task attribute exists and if it's already running
+                if self.fetcher.client and \
+                   not (hasattr(self.fetcher, 'depth_socket_task') and \
+                        self.fetcher.depth_socket_task and \
+                        not self.fetcher.depth_socket_task.done()):
+                    logger.info("[MainApp] Creating task for DataFetcher depth stream...")
+                    self.schedule_gui_update(self.gui_app.update_status_bar)("[MainApp] Starting live ORDER BOOK data stream...")
+                    self.fetcher.depth_socket_task = asyncio.create_task(self.fetcher.start_depth_stream())
+                elif not self.fetcher.client:
+                    logger.warning("[MainApp] Cannot start depth stream: Fetcher client not initialized.")
+                    self.schedule_gui_update(self.gui_app.update_status_bar)("[MainApp] Order book stream NOT started (client missing).")
+                else:
+                    logger.info("[MainApp] Depth stream task already exists or is running.")
 
         except Exception as e:
             logger.error(f"DataFetcher startup or historical fill crashed: {e}", exc_info=True)
@@ -200,17 +225,14 @@ class BotApplication:
         self.schedule_gui_update(self.gui_app.update_status_bar)("[MainApp] Shutting down...")
         self.stop_event.set() # Signal async tasks to stop
 
-        # Attempt to stop the fetcher's asyncio loop gracefully
-        if self.fetcher and hasattr(self.fetcher, 'stop_fetching') and self.fetcher.client and self.fetcher.bsm: # Check if active
-            logger.info("Requesting DataFetcher to stop...")
-            # The fetcher's loop should handle KeyboardInterrupt or other exceptions on stop_event
-            # Or, it needs a dedicated stop method that can be called from here via run_coroutine_threadsafe
-            # For now, setting stop_event is the primary mechanism. The thread join will wait.
+        # Attempt to stop the fetcher's asyncio tasks and close client
+        if self.fetcher: # Check if fetcher object exists
+            logger.info("Requesting DataFetcher to stop all streams...")
             if hasattr(self, 'fetcher_loop') and self.fetcher_loop and self.fetcher_loop.is_running():
-                logger.info("Calling stop_fetching via run_coroutine_threadsafe.")
-                asyncio.run_coroutine_threadsafe(self.fetcher.stop_fetching(), self.fetcher_loop)
+                # stop_all_streams is an async method, handles client closing and task cancellation
+                asyncio.run_coroutine_threadsafe(self.fetcher.stop_all_streams(), self.fetcher_loop)
             else:
-                logger.info("Fetcher loop not available or not running for run_coroutine_threadsafe.")
+                logger.info("Fetcher loop not available or not running for run_coroutine_threadsafe stop_all_streams.")
 
         if self.asyncio_thread and self.asyncio_thread.is_alive():
             logger.info("Waiting for asyncio_thread to finish...")
