@@ -58,8 +58,12 @@ class BotApplication:
 
     def handle_new_orderbook_data(self, orderbook_snapshot):
         """ Passes order book updates to the strategy. """
+        logger.debug(f"[MainApp] handle_new_orderbook_data received snapshot. "
+                   f"Top Bid: {orderbook_snapshot['bids'][0] if orderbook_snapshot and orderbook_snapshot.get('bids') else 'N/A'}, "
+                   f"Top Ask: {orderbook_snapshot['asks'][0] if orderbook_snapshot and orderbook_snapshot.get('asks') else 'N/A'}")
         # logger.debug(f"[MainApp] Received order book snapshot. Top bid: {orderbook_snapshot['bids'][0] if orderbook_snapshot['bids'] else 'N/A'}")
         if self.strategy:
+            logger.debug(f"[MainApp] Calling strategy.process_order_book_update with OB snapshot.")
             self.strategy.process_order_book_update(orderbook_snapshot)
 
     async def start_fetcher_async(self):

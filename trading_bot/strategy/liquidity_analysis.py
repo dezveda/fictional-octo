@@ -14,6 +14,9 @@ def analyze(order_book_snapshot, settings, on_status_update=None): # Added setti
     on_status_update: Callback for status messages.
     Returns: Dict with 'significant_bids': [{'price': p, 'qty': q}, ...], 'significant_asks': [...]
     """
+    logger.debug(f"[LiquidityAnalysisOB] Received snapshot. "
+               f"Bids: {len(order_book_snapshot.get('bids',[])) if order_book_snapshot else 'N/A'}, "
+               f"Asks: {len(order_book_snapshot.get('asks',[])) if order_book_snapshot else 'N/A'}")
     if on_status_update:
         on_status_update("[LiquidityAnalysisOB] Analyzing order book snapshot...")
 
@@ -30,6 +33,7 @@ def analyze(order_book_snapshot, settings, on_status_update=None): # Added setti
 
     # Use settings for thresholds
     qty_threshold = getattr(settings, 'LIQUIDITY_SIGNIFICANT_QTY_THRESHOLD', 10) # Default 10 BTC
+    logger.debug(f"[LiquidityAnalysisOB] Using LIQUIDITY_SIGNIFICANT_QTY_THRESHOLD: {qty_threshold}")
 
     for price, qty in bids:
         if qty >= qty_threshold:
@@ -51,7 +55,11 @@ def analyze(order_book_snapshot, settings, on_status_update=None): # Added setti
          top_ask_info = f"Top Sig Ask: {significant_asks[0]['price']:.2f} Qty:{significant_asks[0]['qty']:.2f}" if significant_asks else "None"
          on_status_update(f"[LiquidityAnalysisOB] {top_bid_info} | {top_ask_info}")
 
-
+    logger.debug(f"[LiquidityAnalysisOB] Analysis complete. "
+               f"Found {len(significant_bids)} significant bids, {len(significant_asks)} significant asks.")
+    # For more detail on top levels (optional, can be verbose):
+    # logger.debug(f'[LiquidityAnalysisOB] Top sig bids: {significant_bids[:3]}')
+    # logger.debug(f'[LiquidityAnalysisOB] Top sig asks: {significant_asks[:3]}')
     return {
         "status": status_msg,
         "significant_bids": significant_bids, # Top N can be sliced later

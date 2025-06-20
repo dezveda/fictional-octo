@@ -120,6 +120,7 @@ class DataFetcher:
                 except Exception as e: logger.error(f'Error in on_kline_callback: {e}')
 
     def _process_depth_message(self, msg):
+        logger.debug(f"[DataFetcherOB] Received depth message summary: lastUpdateId={msg.get('lastUpdateId')}, bids_count={len(msg.get('bids',[]))}, asks_count={len(msg.get('asks',[]))}")
         if 'e' in msg and msg['e'] == 'error':
             logger.error(f"[DataFetcherOB] Depth stream error: {msg.get('m')}")
             if self.on_status_update: self.on_status_update(f"[OB Error] {msg.get('m')}")
@@ -131,7 +132,10 @@ class DataFetcher:
 
             self.order_book['bids'] = new_bids
             self.order_book['asks'] = new_asks
+            # For more detailed debugging of content, uncomment below. Can be very verbose.
+            # logger.debug(f"[DataFetcherOB] Processed - Top 3 Bids: {list(self.order_book['bids'].items())[:3]}, Top 3 Asks: {list(self.order_book['asks'].items())[:3]}")
 
+            logger.debug(f"[DataFetcherOB] Order book processed. Triggering on_orderbook_update_callback if set.")
             if self.on_orderbook_update_callback:
                 self.on_orderbook_update_callback(self.get_order_book_snapshot())
         except Exception as e:
@@ -200,6 +204,7 @@ class DataFetcher:
             # For now, assume BSM is started elsewhere or this call is enough.
             # The 'socket' returned by BSM when using callbacks is often just a control object or None.
             # The actual socket runs in BSM's context.
+            logger.info(f"[DataFetcherOB] Depth socket for {self.symbol} successfully opened/callback registered. Waiting for messages...")
             if self.on_status_update:
                 self.on_status_update(f"[DataFetcherOB] Partial depth stream for {self.symbol} initiated.")
             # Keep this task alive until stop_event or error

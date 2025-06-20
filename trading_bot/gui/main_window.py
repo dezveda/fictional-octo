@@ -313,6 +313,9 @@ class App(ctk.CTk):
     def update_liquidity_display(self, liquidity_result_dict):
         """Updates the GUI with liquidity information from order book analysis."""
         try:
+            logger_gui.debug(f"[GUI Liquidity] update_liquidity_display received. Status: '{liquidity_result_dict.get('status', 'N/A') if isinstance(liquidity_result_dict, dict) else 'Non-dict data'}', "
+                               f"SigBids: {len(liquidity_result_dict.get('significant_bids',[])) if isinstance(liquidity_result_dict, dict) else 'N/A'}, "
+                               f"SigAsks: {len(liquidity_result_dict.get('significant_asks',[])) if isinstance(liquidity_result_dict, dict) else 'N/A'}")
             if not liquidity_result_dict or not isinstance(liquidity_result_dict, dict):
                 self.liquidity_display_label.configure(text="Liquidity: Invalid data received.")
                 return
