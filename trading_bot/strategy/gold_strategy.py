@@ -262,8 +262,11 @@ class GoldenStrategy:
 
     def process_order_book_update(self, order_book_snapshot):
         """ Processes new order book data and triggers liquidity analysis. """
+        logger.debug(f"[GoldenStrategy] process_order_book_update received snapshot. "
+                   f"Top Bid: {order_book_snapshot['bids'][0] if orderbook_snapshot and orderbook_snapshot.get('bids') else 'N/A'}, "
+                   f"Top Ask: {orderbook_snapshot['asks'][0] if orderbook_snapshot and orderbook_snapshot.get('asks') else 'N/A'}")
         self.latest_order_book_snapshot = order_book_snapshot
-        # logger.debug(f"[GoldenStrategy] Order book snapshot received. Top bid: {order_book_snapshot['bids'][0] if order_book_snapshot.get('bids') else 'N/A'}")
+        # logger.debug(f"[GoldenStrategy] Order book snapshot received. Top bid: {orderbook_snapshot['bids'][0] if order_book_snapshot.get('bids') else 'N/A'}")
 
         # Call liquidity analysis using the imported module
         # The 'settings' module is globally available in this file.
@@ -272,7 +275,11 @@ class GoldenStrategy:
             settings,
             self.on_status_update
         )
+        logger.debug(f"[GoldenStrategy] Liquidity analysis result: "
+                   f"Sig Bids: {len(self.latest_liquidity_analysis.get('significant_bids',[])) if self.latest_liquidity_analysis else 'N/A'}, "
+                   f"Sig Asks: {len(self.latest_liquidity_analysis.get('significant_asks',[])) if self.latest_liquidity_analysis else 'N/A'}")
 
+        logger.debug(f"[GoldenStrategy] Calling on_liquidity_update_callback with latest_liquidity_analysis.")
         if self.on_liquidity_update_callback and not self.is_historical_fill_active: # Assuming OB updates are live only
             self.on_liquidity_update_callback(self.latest_liquidity_analysis)
 
@@ -461,6 +468,10 @@ class GoldenStrategy:
                         logger.debug(f"[SR_Assess] Rejection detected at Fib {fib_val_key*100:.1f}% resistance: {fib_level_price:.2f}")
                         return 'REJECT_RESISTANCE_FIB'
 
+        # Log received liquidity data before processing it
+        logger.debug(f"[SR_Assess] Assessing Order Book Liquidity. Received liquidity_zones type: {type(liquidity_zones)}. "
+                   f"Sig Bids: {len(liquidity_zones.get('significant_bids',[])) if isinstance(liquidity_zones, dict) else 'N/A Data'}, "
+                   f"Sig Asks: {len(liquidity_zones.get('significant_asks',[])) if isinstance(liquidity_zones, dict) else 'N/A Data'}")
         # 3. Check Order Book Liquidity Levels (New Logic)
         # 'liquidity_zones' argument now contains the result from order-book based liquidity_analysis.analyze()
         if liquidity_zones and isinstance(liquidity_zones, dict):
