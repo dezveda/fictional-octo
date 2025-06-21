@@ -53,10 +53,13 @@ To create a standalone `.exe` file that can run on Windows without requiring a P
 2.  **Run PyInstaller:**
     Navigate to the root directory of the project in your command prompt (where `trading_bot` folder is located).
     A common PyInstaller command for a GUI application like this would be:
-
     ```bash
-    pyinstaller --noconfirm --onefile --windowed --icon="path/to/your/icon.ico" --add-data "trading_bot/utils:trading_bot/utils" trading_bot/main.py --name GoldenStrategyBot
+    # On Windows (use ';' as path separator for --add-data):
+    pyinstaller --noconfirm --onefile --windowed --icon="path/to/your/icon.ico" --add-data "trading_bot\\utils;trading_bot\\utils" trading_bot\\main.py --name GoldenStrategyBot
+    # On Linux/macOS (use ':' as path separator for --add-data):
+    # pyinstaller --noconfirm --onefile --windowed --icon="path/to/your/icon.ico" --add-data "trading_bot/utils:trading_bot/utils" trading_bot/main.py --name GoldenStrategyBot
     ```
+    **Note on `--add-data` path separator**: PyInstaller uses `os.pathsep` (which is `;` on Windows, `:` on Linux/macOS) to separate multiple `--add-data` arguments if you list them one after another like `--add-data src1;dst1 --add-data src2;dst2`. However, for a single `source:destination` pair *within one* `--add-data` argument, the separator between `source` and `destination` is usually `:`, but PyInstaller is often flexible. For clarity and cross-platform PyInstaller CLI usage, the `Path(source).resolve():Path(destination_in_bundle).resolve()` syntax in spec files is more robust, but for CLI, providing the OS-specific version is safer in documentation. The example above clarifies for Windows.
 
     **Explanation of options:**
     *   `--noconfirm`: Overwrites previous builds without asking.
@@ -73,8 +76,13 @@ To create a standalone `.exe` file that can run on Windows without requiring a P
     After PyInstaller finishes, you will find the executable in a `dist` folder created in your project's root directory (e.g., `dist/GoldenStrategyBot.exe`).
 
 4.  **Potential Challenges with Packaging:**
-    *   **Hidden Imports:** PyInstaller might not always detect all necessary imports, especially for libraries like CustomTkinter or dynamically loaded ones. You might need to use the `--hidden-import` option in PyInstaller.
-    *   **Data Files/Assets:** As mentioned, ensure all necessary data files (like `settings.py` or any UI assets) are correctly included using `--add-data` or by copying them to the `dist` folder post-build. The paths used in your code to access these files might need to be adjusted to work correctly when running as a bundled executable (e.g., using helper functions to determine the correct path when running as a bundled executable).
-    *   **Anti-virus Software:** Sometimes, executables created by PyInstaller can be flagged by anti-virus software (false positives).
-
-Always test the packaged executable thoroughly on a clean Windows environment (ideally one that doesn't have Python installed) to ensure it runs as expected.
+    *   **Hidden Imports:** PyInstaller might not always detect all necessary imports, especially for complex libraries like `pandas`, `numpy`, `matplotlib`, `customtkinter`, or `mplfinance`. If you encounter `ModuleNotFoundError` when running the packaged executable, you might need to use the `--hidden-import` option in PyInstaller for the missing sub-modules. Common examples could be specific `pandas` or `numpy` internals, or parts of `customtkinter`.
+        *Example*: `pyinstaller ... --hidden-import="pandas._libs.tslibs.timestamps"`
+    *   **Data Files/Assets:**
+        *   **`utils/settings.py`**: The provided `--add-data "trading_bot/utils:trading_bot/utils"` (or `trading_bot\utils;trading_bot\utils` on Windows for PyInstaller path separator) is essential for `settings.py`.
+        *   **CustomTkinter Assets**: CustomTkinter themes and images are usually installed within its `site-packages` directory. If the packaged application has missing themes or visual elements, you may need to find the `customtkinter/assets` folder in your Python environment's `site-packages` and add it using `--add-data`.
+            *Example path to find*: `venv\Lib\site-packages\customtkinter\assets`
+            *Example `--add-data`*: `--add-data "venv/Lib/site-packages/customtkinter/assets:customtkinter/assets"`
+        *   **Matplotlib/mplfinance Data**: Matplotlib usually bundles its necessary data (`matplotlibrc`, fonts, etc.). `mplfinance` uses Matplotlib's infrastructure. If specific custom styles or fonts were used directly as files (not the case in this project, as styles were defined in code), they would also need to be added.
+    *   **Anti-virus Software:** Executables created by PyInstaller can sometimes be flagged by anti-virus software (false positives). This is a common issue with PyInstaller bundles.
+    *   **Path Issues in Code**: Ensure that any file paths used in the code (e.g., for loading icons, though not currently used, or future features like saving reports) are relative or use functions to determine correct paths when running as a bundled executable (e.g., using `sys._MEIPASS` for temporary PyInstaller paths, or `os.path.dirname(sys.executable)` for files next to the .exe). Currently, `settings.py` is accessed via module import, which PyInstaller handles if the `utils` folder is correctly added as data.
